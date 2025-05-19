@@ -239,6 +239,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                         app.navigate_key_tree_up();
                                     }
                                 }
+                                KeyCode::Esc => { // New: Navigate to root of key tree
+                                    if app.is_key_view_focused {
+                                        app.navigate_to_key_tree_root();
+                                    }
+                                    // If other views are focused, Esc might have other meanings or do nothing here
+                                }
                                 _ => {}
                             }
                         }

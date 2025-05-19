@@ -901,6 +901,12 @@ impl App {
             }
         }
     }
+
+    pub fn navigate_to_key_tree_root(&mut self) {
+        self.current_breadcrumb.clear();
+        self.update_visible_keys(); // This will reset selected_visible_key_index to 0
+        self.clear_selected_key_info(); // Clear details of any previously selected leaf key
+    }
 }
 
 // --- Methods for Fuzzy Search ---
@@ -966,13 +972,20 @@ impl App {
 
     pub fn activate_selected_filtered_key(&mut self) {
         if self.selected_filtered_key_index < self.filtered_keys_in_current_view.len() {
-            let (selected_key_name, _is_folder) = self.filtered_keys_in_current_view[self.selected_filtered_key_index].clone();
-            // Find this key in the original `visible_keys_in_current_view` to get its original index
+            let (selected_key_name, is_folder) = self.filtered_keys_in_current_view[self.selected_filtered_key_index].clone();
+            
             if let Some(original_index) = self.visible_keys_in_current_view.iter().position(|(name, _)| name == &selected_key_name) {
                 self.selected_visible_key_index = original_index;
-                self.activate_selected_key(); // Call the original activation logic
+                self.activate_selected_key(); // This will navigate into folder or select leaf
+
+                if is_folder {
+                    // If it was a folder, stay in search mode and re-filter the new level
+                    self.update_filtered_keys(); 
+                } else {
+                    // If it was a leaf, exit search mode
+                    self.exit_search_mode();
+                }
             }
-            // If not found (shouldn't happen if filtered_keys is a subset), do nothing or log error
         }
     }
-} 
+}
