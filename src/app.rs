@@ -55,6 +55,13 @@ pub struct App {
     pub search_query: String,
     pub filtered_keys_in_current_view: Vec<(String, bool)>, // (display_name, is_folder)
     pub selected_filtered_key_index: usize,
+
+    // Delete Confirmation State
+    pub show_delete_confirmation_dialog: bool,
+    pub key_to_delete_display_name: Option<String>,
+    pub key_to_delete_full_path: Option<String>, // For leaf keys
+    pub prefix_to_delete: Option<String>,      // For folders
+    pub deletion_is_folder: bool,
 }
 
 // REMOVE clipboard functions from global scope if they are here.
@@ -153,6 +160,13 @@ impl App {
             search_query: String::new(),
             filtered_keys_in_current_view: Vec::new(),
             selected_filtered_key_index: 0,
+
+            // Delete Confirmation State
+            show_delete_confirmation_dialog: false,
+            key_to_delete_display_name: None,
+            key_to_delete_full_path: None,
+            prefix_to_delete: None,
+            deletion_is_folder: false,
         };
 
         if !app.profiles.is_empty() {
@@ -906,6 +920,93 @@ impl App {
         self.current_breadcrumb.clear();
         self.update_visible_keys(); // This will reset selected_visible_key_index to 0
         self.clear_selected_key_info(); // Clear details of any previously selected leaf key
+    }
+
+    pub fn initiate_delete_selected_item(&mut self) {
+        if self.is_search_active || self.selected_visible_key_index >= self.visible_keys_in_current_view.len() {
+            // Do not initiate delete if in search mode or selection is invalid
+            return;
+        }
+
+        let (display_name, is_folder) = self.visible_keys_in_current_view[self.selected_visible_key_index].clone();
+        self.key_to_delete_display_name = Some(display_name.clone());
+        self.deletion_is_folder = is_folder;
+
+        if is_folder {
+            let mut prefix_parts = self.current_breadcrumb.clone();
+            prefix_parts.push(display_name.trim_end_matches(self.key_delimiter).to_string()); // Use delimiter here
+            self.prefix_to_delete = Some(format!("{}{}", prefix_parts.join(&self.key_delimiter.to_string()), self.key_delimiter));
+            self.key_to_delete_full_path = None;
+        } else {
+            // Construct full key name for leaf
+            let mut full_key_parts = self.current_breadcrumb.clone();
+            full_key_parts.push(display_name);
+            self.key_to_delete_full_path = Some(full_key_parts.join(&self.key_delimiter.to_string()));
+            self.prefix_to_delete = None;
+        }
+        self.show_delete_confirmation_dialog = true;
+    }
+
+    pub fn confirm_delete_item(&mut self) {
+        if !self.show_delete_confirmation_dialog {
+            return;
+        }
+
+        let mut deleted_count = 0;
+        let mut deletion_error: Option<String> = None;
+
+        if let Some(mut con) = self.redis_connection.take() {
+            if self.deletion_is_folder {
+                if let Some(prefix) = self.prefix_to_delete.clone() { // Clone to avoid borrow issues
+                    // For folders, we need to find all keys matching the prefix
+                    match redis::cmd("KEYS").arg(format!("{}*", prefix)).query::<Vec<String>>(&mut con) {
+                        Ok(keys_to_delete) => {
+                            if !keys_to_delete.is_empty() {
+                                match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query::<i32>(&mut con) {
+                                    Ok(count) => deleted_count = count,
+                                    Err(e) => deletion_error = Some(format!("Failed to DEL keys for prefix '{}': {}", prefix, e)),
+                                }
+                            } else {
+                                // No keys matched the prefix, arguably not an error, but nothing deleted.
+                                self.clipboard_status = Some(format!("No keys found matching prefix '{}' to delete.", prefix));
+                            }
+                        }
+                        Err(e) => deletion_error = Some(format!("Failed to KEYS for prefix '{}': {}", prefix, e)),
+                    }
+                }
+            } else if let Some(full_key) = self.key_to_delete_full_path.clone() { // Clone for similar reasons
+                match redis::cmd("DEL").arg(&full_key).query::<i32>(&mut con) {
+                    Ok(count) => deleted_count = count,
+                    Err(e) => deletion_error = Some(format!("Failed to DEL key '{}': {}", full_key, e)),
+                }
+            }
+            self.redis_connection = Some(con);
+        } else {
+            deletion_error = Some("No Redis connection to perform delete.".to_string());
+        }
+
+        if let Some(err_msg) = deletion_error {
+            self.clipboard_status = Some(err_msg); // Use clipboard_status to show error
+        } else if deleted_count > 0 {
+            self.clipboard_status = Some(format!("Successfully deleted {} key(s).", deleted_count));
+            self.fetch_keys_and_build_tree(); // Refresh
+        } else if self.prefix_to_delete.is_some() && deleted_count == 0 && self.clipboard_status.is_none() {
+             // Handled the "No keys matched prefix" case already by setting clipboard_status
+        } else if self.key_to_delete_full_path.is_some() && deleted_count == 0 {
+            self.clipboard_status = Some(format!("Key '{}' not found or already deleted.", self.key_to_delete_display_name.as_deref().unwrap_or("selected")));
+        }
+
+
+        // Reset confirmation state
+        self.cancel_delete_item();
+    }
+
+    pub fn cancel_delete_item(&mut self) {
+        self.show_delete_confirmation_dialog = false;
+        self.key_to_delete_display_name = None;
+        self.key_to_delete_full_path = None;
+        self.prefix_to_delete = None;
+        self.deletion_is_folder = false;
     }
 }
 

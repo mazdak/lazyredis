@@ -6,6 +6,7 @@ pub struct ConnectionProfile {
     pub name: String,
     pub url: String,
     pub db: Option<u8>,
+    pub dev: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
@@ -19,9 +20,10 @@ impl Config {
         Config {
             profiles: vec![
                 ConnectionProfile {
-                    name: "Default Local".to_string(),
+                    name: "Default".to_string(),
                     url: "redis://127.0.0.1:6379".to_string(),
-                    db: None,
+                    db: Some(0),
+                    dev: Some(true),
                 }
             ]
         }
