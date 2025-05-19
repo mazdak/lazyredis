@@ -127,7 +127,8 @@ fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
 fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut key_view_base_title = format!("Keys: {}", app.current_breadcrumb.join(&app.key_delimiter.to_string()));
     if app.is_search_active {
-        key_view_base_title = format!("Search Keys ({}): {} [/]", app.search_query, app.current_breadcrumb.join(&app.key_delimiter.to_string()));
+        // For global search, breadcrumb is less relevant in title, show search query
+        key_view_base_title = format!("Search Results (Global): {}", app.search_query);
     }
 
     let key_view_title = if app.is_key_view_focused {
@@ -136,23 +137,30 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
         key_view_base_title
     };
 
-    let items_to_display = if app.is_search_active {
-        &app.filtered_keys_in_current_view
+    let key_items: Vec<ListItem> = if app.is_search_active {
+        app.filtered_keys_in_current_view
+            .iter()
+            .map(|full_key_name| ListItem::new(full_key_name.as_str()))
+            .collect()
     } else {
-        &app.visible_keys_in_current_view
+        app.visible_keys_in_current_view
+            .iter()
+            .map(|(name, _is_folder)| ListItem::new(name.as_str()))
+            .collect()
     };
+
     let selected_key_index = if app.is_search_active {
         app.selected_filtered_key_index
     } else {
         app.selected_visible_key_index
     };
 
-    let key_items: Vec<ListItem> = items_to_display
-        .iter()
-        .map(|(name, _is_folder)| ListItem::new(name.as_str()))
-        .collect();
+    let mut list_state = ListState::default(); 
+    // Check emptiness and length before moving key_items
+    let is_list_empty = key_items.is_empty();
+    let list_len = key_items.len();
 
-    let list_widget = List::new(key_items)
+    let list_widget = List::new(key_items) // key_items is moved here
         .block(Block::default().borders(Borders::ALL).title(key_view_title))
         .highlight_style(
             Style::default()
@@ -162,8 +170,7 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
         )
         .highlight_symbol(if app.is_key_view_focused { ">> " } else { "  " });
 
-    let mut list_state = ListState::default(); 
-    if !items_to_display.is_empty() && selected_key_index < items_to_display.len() {
+    if !is_list_empty && selected_key_index < list_len {
         list_state.select(Some(selected_key_index));
     }
 

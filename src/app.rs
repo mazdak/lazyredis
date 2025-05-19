@@ -53,7 +53,7 @@ pub struct App {
     // Fuzzy Search State
     pub is_search_active: bool,
     pub search_query: String,
-    pub filtered_keys_in_current_view: Vec<(String, bool)>, // (display_name, is_folder)
+    pub filtered_keys_in_current_view: Vec<String>,
     pub selected_filtered_key_index: usize,
 
     // Delete Confirmation State
@@ -1017,10 +1017,9 @@ impl App {
         self.is_key_view_focused = true; // Search operates on the key view
         self.is_value_view_focused = false;
         self.search_query.clear();
-        // Initialize filtered_keys with current visible keys, or perform an initial empty search
-        self.filtered_keys_in_current_view = self.visible_keys_in_current_view.clone(); 
-        self.selected_filtered_key_index = 0; // Or try to match self.selected_visible_key_index
-        self.update_filtered_keys(); // Perform initial filtering (which might be on an empty query)
+        self.filtered_keys_in_current_view.clear(); // Initialize as empty for global search
+        self.selected_filtered_key_index = 0;
+        self.update_filtered_keys(); // Populate based on (empty) query from raw_keys
     }
 
     pub fn exit_search_mode(&mut self) {
@@ -1033,14 +1032,14 @@ impl App {
 
     pub fn update_filtered_keys(&mut self) {
         if self.search_query.is_empty() {
-            self.filtered_keys_in_current_view = self.visible_keys_in_current_view.clone();
+            self.filtered_keys_in_current_view.clear(); // Clear results if query is empty
         } else {
             let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
-            self.filtered_keys_in_current_view = self.visible_keys_in_current_view
+            self.filtered_keys_in_current_view = self.raw_keys // Search all raw_keys
                 .iter()
-                .filter_map(|(name, is_folder)| {
-                    matcher.fuzzy_match(name, &self.search_query)
-                        .map(|_score| (name.clone(), *is_folder)) // We just care if it matches, not the score for now
+                .filter_map(|full_key_name| {
+                    matcher.fuzzy_match(full_key_name, &self.search_query)
+                        .map(|_score| full_key_name.clone()) // Store the full_key_name if it matches
                 })
                 .collect();
         }
@@ -1073,20 +1072,72 @@ impl App {
 
     pub fn activate_selected_filtered_key(&mut self) {
         if self.selected_filtered_key_index < self.filtered_keys_in_current_view.len() {
-            let (selected_key_name, is_folder) = self.filtered_keys_in_current_view[self.selected_filtered_key_index].clone();
-            
-            if let Some(original_index) = self.visible_keys_in_current_view.iter().position(|(name, _)| name == &selected_key_name) {
-                self.selected_visible_key_index = original_index;
-                self.activate_selected_key(); // This will navigate into folder or select leaf
+            let full_key_path = self.filtered_keys_in_current_view[self.selected_filtered_key_index].clone();
+            let path_segments: Vec<String> = full_key_path.split(self.key_delimiter).map(|s| s.to_string()).collect();
 
-                if is_folder {
-                    // If it was a folder, stay in search mode and re-filter the new level
-                    self.update_filtered_keys(); 
-                } else {
-                    // If it was a leaf, exit search mode
-                    self.exit_search_mode();
+            if path_segments.is_empty() {
+                self.exit_search_mode();
+                return;
+            }
+
+            // Determine if the selected path is effectively a folder or a leaf
+            // A path is a folder if it has children in the key_tree or if other raw_keys start with this path + delimiter
+            let mut is_folder_in_tree = false;
+            let mut current_level = &self.key_tree;
+            for (i, segment) in path_segments.iter().enumerate() {
+                if i < path_segments.len() -1 { // Not the last segment
+                    if let Some(KeyTreeNode::Folder(sub_map)) = current_level.get(segment) {
+                        current_level = sub_map;
+                    } else {
+                        // Path segment not found as folder, cannot be a folder in tree this way
+                        is_folder_in_tree = false;
+                        break;
+                    }
+                } else { // Last segment
+                    if let Some(KeyTreeNode::Folder(_)) = current_level.get(segment) {
+                        is_folder_in_tree = true; // Exact match is a folder node
+                    }
+                    // If it's a Leaf node, is_folder_in_tree remains false
                 }
             }
+            
+            // Alternative check: if any *other* raw key starts with this full_key_path + delimiter
+            // This handles cases where a key itself might be a leaf (e.g. `seed:user:1`) but also a prefix for others (`seed:user:1:name`)
+            if !is_folder_in_tree {
+                let prefix_to_check = format!("{}{}", full_key_path, self.key_delimiter);
+                if self.raw_keys.iter().any(|k| k.starts_with(&prefix_to_check)) {
+                    is_folder_in_tree = true;
+                }
+            }
+
+            let leaf_name_if_leaf = if !is_folder_in_tree { path_segments.last().cloned() } else { None };
+
+            if is_folder_in_tree {
+                self.current_breadcrumb = path_segments;
+            } else {
+                // It's a leaf key. Breadcrumb is its parent path.
+                self.current_breadcrumb = if path_segments.len() > 1 {
+                    path_segments[0..path_segments.len()-1].to_vec()
+                } else {
+                    Vec::new() // Root level leaf key
+                };
+            }
+
+            self.update_visible_keys(); // Update view to the new breadcrumb path
+
+            if !is_folder_in_tree {
+                if let Some(leaf_name) = leaf_name_if_leaf { // Use the captured leaf_name
+                    if let Some(idx) = self.visible_keys_in_current_view.iter().position(|(name, is_folder)| name == &leaf_name && !*is_folder) {
+                        self.selected_visible_key_index = idx;
+                        self.activate_selected_key(); // Load its value
+                    }
+                }
+            } else {
+                // If it was a folder, clear any active leaf selection from before search
+                self.clear_selected_key_info();
+            }
+
+            self.exit_search_mode();
         }
     }
 }
