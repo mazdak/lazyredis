@@ -262,7 +262,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                             _ => {}
                         }
                     } else {
-                        if key.modifiers == KeyModifiers::SHIFT && key.code == KeyCode::Tab {
+                        if (key.modifiers == KeyModifiers::SHIFT && key.code == KeyCode::Tab) || key.code == KeyCode::BackTab {
                              app.cycle_focus_backward();
                         } else {
                             match key.code {

@@ -29,110 +29,99 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn ui(f: &mut Frame, app: &App) {
-    // Define main layout areas
+    // Define main layout areas for when modals are NOT fully obscuring
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // For profiles/DB list and connection status
+            Constraint::Length(5), // Increased height for DB list and status
             Constraint::Min(0),    // For key/value panels
             Constraint::Length(1), // For footer help
             Constraint::Length(1), // For clipboard status
         ].as_ref())
         .split(f.area());
 
-    // Split the main content area for key list and value display
-    let content_layout_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
-        .split(main_layout[1]);
-
-    // Draw top panel (profiles or DB list)
-    draw_profiles_or_db_list(f, app, main_layout[0]);
-
-    // Draw main content panels (keys and value)
-    // These are drawn unless a full-screen modal like profile selector might be covering them.
-    // For now, profile selector is part of draw_profiles_or_db_list and doesn't cover these.
-    draw_key_list_panel(f, app, content_layout_chunks[0]);
-    draw_value_display_panel(f, app, content_layout_chunks[1]);
-    
-    // Draw footer and status messages
-    draw_footer_help(f, app, main_layout[2]);
-    draw_clipboard_status(f, app, main_layout[3]);
-
-    // Modals should be drawn last so they appear on top
     if app.is_profile_selector_active {
-        // Profile selector is currently integrated into draw_profiles_or_db_list.
-        // If it were a separate modal, it would be drawn here:
-        // draw_profile_selector_modal(f, app, f.size()); 
-    }
+        // Profile selector takes over the main view
+        draw_profile_selector_modal(f, app);
+        // Still draw footer and status if they are separate from the main content area that modal covers
+        draw_footer_help(f, app, main_layout[2]); // Assuming footer is outside modal coverage or desired
+        draw_clipboard_status(f, app, main_layout[3]);
+    } else {
+        // Normal view
+        let content_layout_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
+            .split(main_layout[1]);
 
-    if app.show_delete_confirmation_dialog {
-        draw_delete_confirmation_dialog(f, app); // Draw delete confirmation dialog if active
+        draw_profiles_or_db_list(f, app, main_layout[0]);
+        draw_key_list_panel(f, app, content_layout_chunks[0]);
+        draw_value_display_panel(f, app, content_layout_chunks[1]);
+        
+        draw_footer_help(f, app, main_layout[2]);
+        draw_clipboard_status(f, app, main_layout[3]);
+
+        if app.show_delete_confirmation_dialog {
+            draw_delete_confirmation_dialog(f, app);
+        }
     }
 }
 
 fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
-    let outer_block_title = if app.is_profile_selector_active {
-        "Select Connection Profile (p to close)"
+    let is_focused = !app.is_key_view_focused && !app.is_value_view_focused;
+    let block_title = if is_focused {
+        "Databases / Connection [FOCUSED]"
     } else {
         "Databases / Connection"
     };
-    let outer_block = Block::default().borders(Borders::ALL).title(outer_block_title);
-    f.render_widget(outer_block, area);
+    let outer_block = Block::default().borders(Borders::ALL).title(block_title);
+    f.render_widget(outer_block.clone(), area); // Render the block itself
+    let inner_area = outer_block.inner(area); // Get area inside borders
 
-    let inner_chunks = Layout::default()
+    // Split inner_area for a vertical DB list and a status message area
+    let vertical_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref()) // Content and status line
-        .margin(1)
-        .split(area);
+        .constraints([
+            Constraint::Min(0),       // For DB List
+            Constraint::Length(1),    // For Connection Status (adjust if wrapping needed)
+        ].as_ref())
+        .split(inner_area);
+    
+    let db_list_area = vertical_chunks[0];
+    let status_area = vertical_chunks[1];
 
-    if app.is_profile_selector_active {
-        let profiles: Vec<ListItem> = app.profiles.iter().enumerate().map(|(idx, profile)| {
-            let style = if idx == app.selected_profile_list_index {
-                Style::default().fg(Color::Black).bg(Color::White)
+    // Render DB List (Vertical)
+    let dbs: Vec<ListItem> = (0..app.db_count)
+        .map(|i| {
+            let display_text = format!("DB {}", i);
+            let style = if i as usize == app.selected_db_index {
+                if is_focused {
+                    Style::default().fg(Color::Black).bg(Color::White) // Focused and selected
+                } else {
+                    Style::default().fg(Color::Cyan) // Selected but not focused
+                }
             } else {
                 Style::default()
             };
-            ListItem::new(format!("{} ({})", profile.name, profile.url)).style(style)
-        }).collect();
-        let profiles_list = List::new(profiles)
-            .block(Block::default())
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-            .highlight_symbol(">> ");
-        f.render_widget(profiles_list, inner_chunks[0]);
-    } else {
-        // Display DB list and current connection status
-        let db_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
-            .split(inner_chunks[0]);
+            ListItem::new(display_text).style(style)
+        })
+        .collect();
 
-        let dbs: Vec<ListItem> = (0..app.db_count)
-            .map(|i| {
-                let display_text = if i as usize == app.selected_db_index {
-                    format!("DB {} <<<", i)
-                } else {
-                    format!("DB {}", i)
-                };
-                let style = if i as usize == app.selected_db_index && !app.is_key_view_focused && !app.is_value_view_focused {
-                    Style::default().fg(Color::Black).bg(Color::White) // Highlight if DB panel focused
-                } else if i as usize == app.selected_db_index {
-                    Style::default().fg(Color::Cyan) // Indicate selected but not focused
-                } else {
-                    Style::default()
-                };
-                ListItem::new(display_text).style(style)
-            })
-            .collect();
-        let db_list = List::new(dbs)
-            .block(Block::default().title(if !app.is_key_view_focused && !app.is_value_view_focused {"[DBs]"} else {"DBs"}));
-        f.render_widget(db_list, db_chunks[0]);
-        
-        let connection_status_paragraph = Paragraph::new(app.connection_status.as_str())
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("Status"));
-        f.render_widget(connection_status_paragraph, db_chunks[1]);
+    let db_list_widget = List::new(dbs)
+        .block(Block::default()) // No title for inner list, outer block has it
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD)) // Style for when navigating, if any
+        .highlight_symbol(if is_focused { ">> " } else { "  " });
+    
+    let mut db_list_state = ListState::default();
+    if app.db_count > 0 && (app.selected_db_index as u8) < app.db_count { // Ensure index is valid
+        db_list_state.select(Some(app.selected_db_index));
     }
+    f.render_stateful_widget(db_list_widget, db_list_area, &mut db_list_state);
+
+    // Render Status
+    let connection_status_paragraph = Paragraph::new(app.connection_status.as_str())
+        .wrap(Wrap { trim: true })
+        .alignment(Alignment::Center); // Center status text
+    f.render_widget(connection_status_paragraph, status_area);
 }
 
 fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -295,4 +284,29 @@ fn draw_delete_confirmation_dialog(f: &mut Frame, app: &App) {
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
+}
+
+fn draw_profile_selector_modal(f: &mut Frame, app: &App) {
+    // Define a centered area for the modal, e.g., 60% width, 50% height
+    let area = centered_rect(60, 50, f.area());
+    f.render_widget(Clear, area); // Clear the background
+
+    let profiles: Vec<ListItem> = app.profiles.iter().enumerate().map(|(idx, profile)| {
+        let style = if idx == app.selected_profile_list_index {
+            Style::default().fg(Color::Black).bg(Color::White) // Highlight selected
+        } else {
+            Style::default()
+        };
+        ListItem::new(format!("{} ({})", profile.name, profile.url)).style(style)
+    }).collect();
+
+    let list_widget = List::new(profiles)
+        .block(Block::default().borders(Borders::ALL).title("Select Connection Profile (p/Esc to close)"))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Black).bg(Color::White)) // Ensure highlight is visible
+        .highlight_symbol(">> ");
+    
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.selected_profile_list_index));
+
+    f.render_stateful_widget(list_widget, area, &mut list_state);
 } 
