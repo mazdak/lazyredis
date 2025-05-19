@@ -186,14 +186,40 @@ fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
         value_block_title.push_str(" [FOCUSED]");
     }
 
-    let value_display_text = app.current_display_value.as_deref().unwrap_or("");
+    let block = Block::default().borders(Borders::ALL).title(value_block_title)
+        .border_style(if app.is_value_view_focused { Style::default().fg(Color::Cyan) } else { Style::default() });
 
-    let value_paragraph = Paragraph::new(value_display_text)
-        .block(Block::default().borders(Borders::ALL).title(value_block_title)
-            .border_style(if app.is_value_view_focused { Style::default().fg(Color::Cyan) } else { Style::default() }))
-        .wrap(Wrap { trim: true })
-        .scroll(app.value_view_scroll);
-    f.render_widget(value_paragraph, area);
+    if let Some(lines) = &app.displayed_value_lines {
+        let items: Vec<ListItem> = lines.iter().map(|s| ListItem::new(s.as_str())).collect();
+        let mut list_state = ListState::default();
+        if !items.is_empty() && app.selected_value_sub_index < items.len() {
+            list_state.select(Some(app.selected_value_sub_index));
+        }
+
+        let list_widget = List::new(items)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .bg(if app.is_value_view_focused { Color::Yellow } else { Color::DarkGray })
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(if app.is_value_view_focused { ">> " } else { "  " });
+        
+        // The List widget itself doesn't directly use app.value_view_scroll in the same way Paragraph does.
+        // Ratatui's List state and drawing logic attempt to keep the selected item in view.
+        // If fine-grained manual scrolling of a non-selected list is ever needed, it's more complex.
+        // For now, relying on selection driving the view is standard.
+        f.render_stateful_widget(list_widget, area, &mut list_state);
+
+    } else {
+        let value_display_text = app.current_display_value.as_deref().unwrap_or("");
+        let value_paragraph = Paragraph::new(value_display_text)
+            .block(block)
+            .wrap(Wrap { trim: true })
+            .scroll(app.value_view_scroll); // Keep scroll for simple paragraph display
+        f.render_widget(value_paragraph, area);
+    }
 }
 
 fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
@@ -202,7 +228,9 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" | "),
         Span::styled("p: profiles", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
-        Span::styled("j/k/↑/↓: nav", Style::default().fg(Color::Yellow)),
+        Span::styled("j/k/↑/↓: nav keys/vals", Style::default().fg(Color::Yellow)), // Updated nav help
+        Span::raw(" | "),
+        Span::styled("PgUp/PgDn: page nav vals", Style::default().fg(Color::Yellow)), // Added page nav for values
         Span::raw(" | "),
         Span::styled("Tab/S-Tab: focus", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),

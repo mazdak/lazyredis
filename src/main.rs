@@ -25,6 +25,9 @@ struct CliArgs {
     seed: bool,
 }
 
+// Add a page size constant for value navigation
+const VALUE_NAVIGATION_PAGE_SIZE: usize = 10;
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = CliArgs::parse();
 
@@ -281,7 +284,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 }
                                 KeyCode::Char('j') | KeyCode::Down => {
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_down(1);
+                                        app.select_next_value_item();
                                     } else if app.is_key_view_focused {
                                         app.next_key_in_view();
                                     } else {
@@ -290,7 +293,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 }
                                 KeyCode::Char('k') | KeyCode::Up => {
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_up(1);
+                                        app.select_previous_value_item();
                                     } else if app.is_key_view_focused {
                                         app.previous_key_in_view();
                                     } else {
@@ -299,12 +302,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 }
                                 KeyCode::PageDown => { 
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_page_down();
+                                        app.select_page_down_value_item(VALUE_NAVIGATION_PAGE_SIZE);
                                     }
                                 }
                                 KeyCode::PageUp => { 
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_page_up();
+                                        app.select_page_up_value_item(VALUE_NAVIGATION_PAGE_SIZE);
                                     }
                                 }
                                 KeyCode::Enter => {

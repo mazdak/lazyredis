@@ -49,6 +49,8 @@ pub struct App {
     pub value_view_scroll: (u16, u16),
     pub clipboard_status: Option<String>,
     pub current_display_value: Option<String>,
+    pub displayed_value_lines: Option<Vec<String>>, // For multi-line values (hashes, lists, etc.)
+    pub selected_value_sub_index: usize, // Index for selected item in displayed_value_lines
 
     // Fuzzy Search State
     pub is_search_active: bool,
@@ -104,23 +106,63 @@ impl App {
 
     pub fn copy_selected_key_value_to_clipboard(&mut self) {
         self.clipboard_status = None; // Clear previous status
-        if let Some(value_str) = &self.current_display_value {
-            if self.active_leaf_key_name.is_some() { // Only copy if a leaf key is active
-                match SystemClipboard::new() {
-                    Ok(clipboard) => { // clipboard needs to be mut
-                        match clipboard.set_string_contents(value_str.clone()) {
-                            Ok(_) => self.clipboard_status = Some("Copied value to clipboard!".to_string()),
-                            Err(e) => self.clipboard_status = Some(format!("Failed to copy value to clipboard: {}", e)),
-                        }
-                    }
-                    Err(e) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+        let mut value_to_copy: Option<String> = None;
+
+        if self.is_value_view_focused {
+            // Value view is focused: copy the selected sub-item
+            if let Some(lines) = &self.displayed_value_lines {
+                if !lines.is_empty() && self.selected_value_sub_index < lines.len() {
+                    value_to_copy = Some(lines[self.selected_value_sub_index].clone());
+                } else {
+                    self.clipboard_status = Some("No specific value item selected to copy.".to_string());
                 }
             } else {
-                self.clipboard_status = Some("No active key value to copy.".to_string()); // Message from app_D, app_C was "No key selected to copy"
+                self.clipboard_status = Some("No multi-line value items to select from.".to_string());
             }
         } else {
-            self.clipboard_status = Some("No value to copy".to_string());
+            // Key view is focused (or no specific sub-item focus): copy the whole value representation
+            if self.active_leaf_key_name.is_some() {
+                if let Some(lines) = &self.displayed_value_lines {
+                    if !lines.is_empty() {
+                        value_to_copy = Some(lines.join("\n"));
+                    } else {
+                        // This case might occur if a complex type is genuinely empty AND update_current_display_value
+                        // decided to set displayed_value_lines = Some(vec![]) instead of current_display_value.
+                        // For instance, an empty hash might be represented by current_display_value = "(empty hash)".
+                        // Let's try current_display_value if displayed_value_lines is Some but empty.
+                        if let Some(cvd) = &self.current_display_value {
+                             // Check if it's a placeholder like "(empty list)" rather than a real value
+                            if !cvd.starts_with("(") || !cvd.ends_with(")") {
+                                value_to_copy = Some(cvd.clone());
+                            } else {
+                                self.clipboard_status = Some(format!("Value is an empty placeholder: {}", cvd));
+                            }
+                        } else {
+                             self.clipboard_status = Some("No value content to copy (displayed_value_lines is empty).".to_string());
+                        }
+                    }
+                } else if let Some(s_val) = &self.current_display_value {
+                    // This handles simple strings, (nil), or error messages in current_display_value
+                    value_to_copy = Some(s_val.clone());
+                } else {
+                    self.clipboard_status = Some("No value available to copy for the selected key.".to_string());
+                }
+            } else {
+                self.clipboard_status = Some("No active key selected to copy value from.".to_string());
+            }
         }
+
+        if let Some(value_str) = value_to_copy {
+            match SystemClipboard::new() {
+                Ok(clipboard) => { 
+                    match clipboard.set_string_contents(value_str.clone()) {
+                        Ok(_) => self.clipboard_status = Some(format!("Copied to clipboard: {}", ellipsize(&value_str, 50))),
+                        Err(e) => self.clipboard_status = Some(format!("Failed to copy value to clipboard: {}", e)),
+                    }
+                }
+                Err(e) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+            }
+        } // If value_to_copy is None, a status message should have already been set.
     }
 
     pub fn new(initial_url: &str, initial_profile_name: &str, profiles: Vec<ConnectionProfile>) -> App {
@@ -154,6 +196,8 @@ impl App {
             value_view_scroll: (0, 0),    
             clipboard_status: None, 
             current_display_value: None, 
+            displayed_value_lines: None,
+            selected_value_sub_index: 0,
 
             // Fuzzy Search State
             is_search_active: false,
@@ -245,6 +289,8 @@ impl App {
         self.value_view_scroll = (0, 0);
         self.is_value_view_focused = false;
         self.current_display_value = None;
+        self.displayed_value_lines = None;
+        self.selected_value_sub_index = 0;
     }
 
     // Fetches all keys from Redis and initiates parsing into a tree structure.
@@ -377,6 +423,8 @@ impl App {
                 if let Some(actual_full_key_name) = actual_full_key_name_opt {
                     self.active_leaf_key_name = Some(actual_full_key_name.clone());
                     self.selected_key_type = Some("fetching...".to_string()); 
+                    self.selected_value_sub_index = 0; // Reset sub-index
+                    self.value_view_scroll = (0, 0); // Reset scroll
 
                     if let Some(mut con) = self.redis_connection.take() {
                         // Try GET first, as it's common
@@ -638,18 +686,21 @@ impl App {
 
     // Method to update self.current_display_value based on current key type and value
     fn update_current_display_value(&mut self) {
+        self.current_display_value = None; // Clear simple display value
+        self.displayed_value_lines = None; // Clear line-based display value
+        self.selected_value_sub_index = 0; // Reset sub-index
+        self.value_view_scroll = (0,0); // Reset scroll for new value display
+
         if self.selected_key_type.as_deref() == Some("hash") {
             if let Some(hash_data) = &self.selected_key_value_hash {
                 if hash_data.is_empty() {
                     self.current_display_value = Some("(empty hash)".to_string());
                 } else {
-                    self.current_display_value = Some(
+                    self.displayed_value_lines = Some(
                         hash_data
                             .iter()
-                            .map(|(k, v)| format!("{}: {}\n", k, v))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|(k, v)| format!("{}: {}", k, v))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
@@ -660,78 +711,72 @@ impl App {
                 if zset_data.is_empty() {
                     self.current_display_value = Some("(empty zset)".to_string());
                 } else {
-                    self.current_display_value = Some(
+                    self.displayed_value_lines = Some(
                         zset_data
                             .iter()
-                            .map(|(member, score)| format!("Score: {} - Member: {}\n", score, member))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|(member, score)| format!("Score: {} - Member: {}", score, member))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
                 self.current_display_value = self.selected_key_value.clone(); // Fallback for ZRANGE error
             }
-        } else if self.selected_key_type.as_deref() == Some("list") { // New List handling
+        } else if self.selected_key_type.as_deref() == Some("list") { 
             if let Some(list_data) = &self.selected_key_value_list {
                 if list_data.is_empty() {
                     self.current_display_value = Some("(empty list)".to_string());
                 } else {
-                    self.current_display_value = Some(
+                    self.displayed_value_lines = Some(
                         list_data
                             .iter()
                             .enumerate()
-                            .map(|(idx, val)| format!("{}: {}\n", idx, val))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|(idx, val)| format!("{}: {}", idx, val))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
                 self.current_display_value = self.selected_key_value.clone(); // Fallback for LRANGE error
             }
-        } else if self.selected_key_type.as_deref() == Some("set") { // New Set handling
+        } else if self.selected_key_type.as_deref() == Some("set") { 
             if let Some(set_data) = &self.selected_key_value_set {
                 if set_data.is_empty() {
                     self.current_display_value = Some("(empty set)".to_string());
                 } else {
-                    // For sets, order is not guaranteed, so just list members.
-                    // Sorting them here for consistent display might be nice for users.
                     let mut sorted_set_data = set_data.clone();
-                    sorted_set_data.sort_unstable(); // Sort for consistent display
-                    self.current_display_value = Some(
+                    sorted_set_data.sort_unstable(); 
+                    self.displayed_value_lines = Some(
                         sorted_set_data
                             .iter()
-                            .map(|val| format!("- {}\n", val))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|val| format!("- {}", val))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
                 self.current_display_value = self.selected_key_value.clone(); // Fallback for SMEMBERS error
             }
-        } else if self.selected_key_type.as_deref() == Some("stream") { // New Stream handling
+        } else if self.selected_key_type.as_deref() == Some("stream") { 
             if let Some(stream_entries) = &self.selected_key_value_stream {
                 if stream_entries.is_empty() {
                     self.current_display_value = Some("(empty stream or an error occurred fetching entries)".to_string());
                 } else {
-                    let mut display_string = String::new();
+                    let mut lines: Vec<String> = Vec::new();
                     for entry in stream_entries {
-                        display_string.push_str(&format!("ID: {}\n", entry.id));
+                        lines.push(format!("ID: {}", entry.id));
                         if entry.fields.is_empty(){
-                            display_string.push_str("  (no fields)\n");
+                            lines.push("  (no fields)".to_string());
                         } else {
                             for (field, value) in &entry.fields {
-                                display_string.push_str(&format!("  {}: {}\n", field, value));
+                                lines.push(format!("  {}: {}", field, value));
                             }
                         }
-                        display_string.push_str("---\n"); // Separator between entries
+                        lines.push("---".to_string()); // Separator between entries
                     }
-                    self.current_display_value = Some(display_string.trim_end().to_string());
+                    if lines.last().map_or(false, |l| l == "---") { // Remove trailing separator
+                        lines.pop();
+                    }
+                    self.displayed_value_lines = Some(lines);
                 }
             } else {
-                 // This case implies an error during XREADGROUP itself, message should be in selected_key_value
                 self.current_display_value = self.selected_key_value.clone();
             }
         } else {
@@ -843,25 +888,6 @@ impl App {
         } else { // DB view is focused or no focus
             self.is_key_view_focused = true;
         }
-    }
-
-    pub fn scroll_value_view_down(&mut self, lines: u16) {
-        self.value_view_scroll.0 = self.value_view_scroll.0.saturating_add(lines);
-        // TODO: Consider max scroll based on content height
-    }
-
-    pub fn scroll_value_view_up(&mut self, lines: u16) {
-        self.value_view_scroll.0 = self.value_view_scroll.0.saturating_sub(lines);
-    }
-
-    pub fn scroll_value_view_page_down(&mut self) {
-        let page_size = 10; // Example page size
-        self.scroll_value_view_down(page_size);
-    }
-
-    pub fn scroll_value_view_page_up(&mut self) {
-        let page_size = 10; // Example page size
-        self.scroll_value_view_up(page_size);
     }
 
     pub fn next_key_in_view(&mut self) {
@@ -1139,5 +1165,51 @@ impl App {
 
             self.exit_search_mode();
         }
+    }
+
+    // New value navigation methods
+    pub fn select_next_value_item(&mut self) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                self.selected_value_sub_index = (self.selected_value_sub_index + 1) % lines.len();
+            }
+        }
+    }
+
+    pub fn select_previous_value_item(&mut self) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                if self.selected_value_sub_index > 0 {
+                    self.selected_value_sub_index -= 1;
+                } else {
+                    self.selected_value_sub_index = lines.len() - 1;
+                }
+            }
+        }
+    }
+
+    pub fn select_page_down_value_item(&mut self, page_size: usize) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                self.selected_value_sub_index = (self.selected_value_sub_index + page_size).min(lines.len() - 1);
+            }
+        }
+    }
+
+    pub fn select_page_up_value_item(&mut self, page_size: usize) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                self.selected_value_sub_index = self.selected_value_sub_index.saturating_sub(page_size);
+            }
+        }
+    }
+}
+
+// Helper function for ellipsizing copied content preview (optional)
+fn ellipsize(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        format!("{}...", &text[..max_len.saturating_sub(3)])
     }
 }
