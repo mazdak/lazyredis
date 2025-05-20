@@ -2,6 +2,7 @@ use crate::config::ConnectionProfile;
 use redis::{aio::MultiplexedConnection, Client, Value};
 use tokio::task;
 use std::collections::HashMap;
+use std::future::Future;
 use crossclip::{Clipboard, SystemClipboard}; // Changed from crossclip::Clipboard for directness, though original likely worked.
 use fuzzy_matcher::FuzzyMatcher; // Added import
 
@@ -523,42 +524,70 @@ impl App {
 
     // --- Helper methods for fetching and setting values for specific key types ---
 
-    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        match redis::cmd("HGETALL").arg(key_name).query_async::<Vec<String>>(con).await {
-            Ok(pairs) => {
-                if pairs.is_empty() { 
-                    self.selected_key_value_hash = Some(Vec::new());
+    async fn run_fetch<T, Fut, OkF, ErrF>(&mut self, fut: Fut, on_ok: OkF, on_err: ErrF, err_msg: String)
+    where
+        Fut: Future<Output = redis::RedisResult<T>>,
+        OkF: FnOnce(&mut Self, T),
+        ErrF: FnOnce(&mut Self),
+    {
+        match fut.await {
+            Ok(val) => {
+                on_ok(self, val);
+                self.selected_key_value = None;
+            }
+            Err(e) => {
+                self.selected_key_value = Some(format!("{}: {}", err_msg, e));
+                on_err(self);
+            }
+        }
+    }
+
+    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut Connection) {
+        let fut = redis::cmd("HGETALL").arg(key_name).query_async::<_, Vec<String>>(con);
+        let err_context = format!("Failed to HGETALL for '{}' (hash)", key_name);
+        self.run_fetch(
+            fut,
+            |app, pairs| {
+                if pairs.is_empty() {
+                    app.selected_key_value_hash = Some(Vec::new());
                 } else {
                     let mut hash_data: Vec<(String, String)> = Vec::new();
                     for chunk in pairs.chunks(2) {
                         if chunk.len() == 2 {
                             hash_data.push((chunk[0].clone(), chunk[1].clone()));
                         } else {
-                            self.selected_key_value = Some(format!(
-                                "HGETALL for '{}' (hash) returned malformed pair data.", key_name
+                            app.selected_key_value = Some(format!(
+                                "HGETALL for '{}' (hash) returned malformed pair data.",
+                                key_name
                             ));
-                            self.selected_key_value_hash = None; 
-                            return; 
+                            app.selected_key_value_hash = None;
+                            return;
                         }
                     }
-                    self.selected_key_value_hash = Some(hash_data);
+                    app.selected_key_value_hash = Some(hash_data);
                 }
-                self.selected_key_value = None; // Clear generic error/value holder if successful
-            }
-            Err(e) => {
-                self.selected_key_value = Some(format!(
-                    "Failed to HGETALL for '{}' (hash): {}", key_name, e
-                ));
-                self.selected_key_value_hash = None;
-            }
-        }
+            },
+            |app| {
+                app.selected_key_value_hash = None;
+            },
+            err_context,
+        )
+        .await;
     }
 
-    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        match redis::cmd("ZRANGE").arg(key_name).arg(0).arg(-1).arg("WITHSCORES").query_async::<Vec<String>>(con).await {
-            Ok(pairs) => {
-                if pairs.is_empty() { 
-                    self.selected_key_value_zset = Some(Vec::new());
+    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut Connection) {
+        let fut = redis::cmd("ZRANGE")
+            .arg(key_name)
+            .arg(0)
+            .arg(-1)
+            .arg("WITHSCORES")
+            .query_async::<_, Vec<String>>(con);
+        let err_context = format!("Failed to ZRANGE for '{}' (zset)", key_name);
+        self.run_fetch(
+            fut,
+            |app, pairs| {
+                if pairs.is_empty() {
+                    app.selected_key_value_zset = Some(Vec::new());
                 } else {
                     let mut zset_data: Vec<(String, f64)> = Vec::new();
                     for chunk in pairs.chunks(2) {
@@ -567,62 +596,69 @@ impl App {
                             match chunk[1].parse::<f64>() {
                                 Ok(score) => zset_data.push((member, score)),
                                 Err(_) => {
-                                    self.selected_key_value = Some(format!(
-                                        "ZRANGE for '{}' (zset) failed to parse score for member '{}'.", key_name, member
+                                    app.selected_key_value = Some(format!(
+                                        "ZRANGE for '{}' (zset) failed to parse score for member '{}'.",
+                                        key_name,
+                                        member
                                     ));
-                                    self.selected_key_value_zset = None; 
+                                    app.selected_key_value_zset = None;
                                     return;
                                 }
                             }
                         } else {
-                            self.selected_key_value = Some(format!(
-                                "ZRANGE for '{}' (zset) returned malformed pair data.", key_name
+                            app.selected_key_value = Some(format!(
+                                "ZRANGE for '{}' (zset) returned malformed pair data.",
+                                key_name
                             ));
-                            self.selected_key_value_zset = None; 
+                            app.selected_key_value_zset = None;
                             return;
                         }
                     }
-                    self.selected_key_value_zset = Some(zset_data);
+                    app.selected_key_value_zset = Some(zset_data);
                 }
-                self.selected_key_value = None;
-            }
-            Err(e) => {
-                self.selected_key_value = Some(format!(
-                    "Failed to ZRANGE for '{}' (zset): {}", key_name, e
-                ));
-                self.selected_key_value_zset = None;
-            }
-        }
+            },
+            |app| {
+                app.selected_key_value_zset = None;
+            },
+            err_context,
+        )
+        .await;
     }
 
-    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        match redis::cmd("LRANGE").arg(key_name).arg(0).arg(-1).query_async::<Vec<String>>(con).await {
-            Ok(elements) => {
-                self.selected_key_value_list = Some(elements);
-                self.selected_key_value = None;
-            }
-            Err(e) => {
-                self.selected_key_value = Some(format!(
-                    "Failed to LRANGE for '{}' (list): {}", key_name, e
-                ));
-                self.selected_key_value_list = None;
-            }
-        }
+    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut Connection) {
+        let fut = redis::cmd("LRANGE")
+            .arg(key_name)
+            .arg(0)
+            .arg(-1)
+            .query_async::<_, Vec<String>>(con);
+        let err_context = format!("Failed to LRANGE for '{}' (list)", key_name);
+        self.run_fetch(
+            fut,
+            |app, elements| {
+                app.selected_key_value_list = Some(elements);
+            },
+            |app| {
+                app.selected_key_value_list = None;
+            },
+            err_context,
+        )
+        .await;
     }
 
-    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        match redis::cmd("SMEMBERS").arg(key_name).query_async::<Vec<String>>(con).await {
-            Ok(members) => {
-                self.selected_key_value_set = Some(members);
-                self.selected_key_value = None;
-            }
-            Err(e) => {
-                self.selected_key_value = Some(format!(
-                    "Failed to SMEMBERS for '{}' (set): {}", key_name, e
-                ));
-                self.selected_key_value_set = None;
-            }
-        }
+    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut Connection) {
+        let fut = redis::cmd("SMEMBERS").arg(key_name).query_async::<_, Vec<String>>(con);
+        let err_context = format!("Failed to SMEMBERS for '{}' (set)", key_name);
+        self.run_fetch(
+            fut,
+            |app, members| {
+                app.selected_key_value_set = Some(members);
+            },
+            |app| {
+                app.selected_key_value_set = None;
+            },
+            err_context,
+        )
+        .await;
     }
 
     async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
