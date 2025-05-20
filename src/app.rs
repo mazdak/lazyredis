@@ -542,8 +542,10 @@ impl App {
         }
     }
 
-    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut Connection) {
-        let fut = redis::cmd("HGETALL").arg(key_name).query_async::<_, Vec<String>>(con);
+    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        let mut owned_cmd = redis::cmd("HGETALL");
+        owned_cmd.arg(key_name);
+        let fut = owned_cmd.query_async::<Vec<String>>(con);
         let err_context = format!("Failed to HGETALL for '{}' (hash)", key_name);
         self.run_fetch(
             fut,
@@ -575,13 +577,13 @@ impl App {
         .await;
     }
 
-    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut Connection) {
-        let fut = redis::cmd("ZRANGE")
-            .arg(key_name)
-            .arg(0)
-            .arg(-1)
-            .arg("WITHSCORES")
-            .query_async::<_, Vec<String>>(con);
+    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        let mut owned_cmd = redis::cmd("ZRANGE");
+        owned_cmd.arg(key_name);
+        owned_cmd.arg(0);
+        owned_cmd.arg(-1);
+        owned_cmd.arg("WITHSCORES");
+        let fut = owned_cmd.query_async::<Vec<String>>(con);
         let err_context = format!("Failed to ZRANGE for '{}' (zset)", key_name);
         self.run_fetch(
             fut,
@@ -625,12 +627,12 @@ impl App {
         .await;
     }
 
-    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut Connection) {
-        let fut = redis::cmd("LRANGE")
-            .arg(key_name)
-            .arg(0)
-            .arg(-1)
-            .query_async::<_, Vec<String>>(con);
+    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        let mut owned_cmd = redis::cmd("LRANGE");
+        owned_cmd.arg(key_name);
+        owned_cmd.arg(0);
+        owned_cmd.arg(-1);
+        let fut = owned_cmd.query_async::<Vec<String>>(con);
         let err_context = format!("Failed to LRANGE for '{}' (list)", key_name);
         self.run_fetch(
             fut,
@@ -645,8 +647,10 @@ impl App {
         .await;
     }
 
-    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut Connection) {
-        let fut = redis::cmd("SMEMBERS").arg(key_name).query_async::<_, Vec<String>>(con);
+    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        let mut owned_cmd = redis::cmd("SMEMBERS");
+        owned_cmd.arg(key_name);
+        let fut = owned_cmd.query_async::<Vec<String>>(con);
         let err_context = format!("Failed to SMEMBERS for '{}' (set)", key_name);
         self.run_fetch(
             fut,
