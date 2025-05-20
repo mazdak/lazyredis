@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let verb = if args.purge { "Purging" } else { "Seeding" };
         let noun = if args.purge { "keys" } else { "with test data" };
         println!("{} Redis {}...", verb, noun);
-        let app_config = config::Config::load();
+        let app_config = config::Config::load(None);
 
         let target_profile = if let Some(profile_name) = &args.profile {
             app_config
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app_config_tui = config::Config::load();
+    let app_config_tui = config::Config::load(None);
     let (initial_url, initial_profile_name) = if let Some(profile_name) = &args.profile {
         match app_config_tui.profiles.iter().find(|p| &p.name == profile_name) {
             Some(p) => (p.url.clone(), p.name.clone()),
