@@ -293,7 +293,7 @@ impl App {
         self.selected_value_sub_index = 0;
     }
 
-    // Fetches all keys from Redis and initiates parsing into a tree structure.
+    // Fetches all keys from Redis using SCAN and incrementally updates the tree and view.
     fn fetch_keys_and_build_tree(&mut self) {
         self.raw_keys.clear();
         self.key_tree.clear();
@@ -304,37 +304,52 @@ impl App {
 
         if let Some(mut con) = self.redis_connection.take() {
             self.connection_status = format!("Fetching keys from DB {}...", self.selected_db_index);
-            // Using KEYS for simplicity in this TUI context. SCAN would be better for production.
-            match redis::cmd("KEYS").arg("*").query::<Vec<String>>(&mut con) {
-                Ok(keys) => {
-                    self.raw_keys = keys;
-                    if self.raw_keys.is_empty() {
-                        self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
-                    } else {
+            let mut cursor: u64 = 0;
+            // Iteratively SCAN to avoid blocking Redis and allow incremental UI updates
+            loop {
+                match redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH").arg("*")
+                    .arg("COUNT").arg(1000)
+                    .query::<(u64, Vec<String>)>(&mut con)
+                {
+                    Ok((next_cursor, batch)) => {
+                        cursor = next_cursor;
+                        self.raw_keys.extend(batch);
+                        if !self.raw_keys.is_empty() {
+                            self.parse_keys_to_tree();
+                            self.update_visible_keys();
+                        }
                         self.connection_status = format!(
-                            "Connected to DB {}. Found {} keys. Parsing...",
+                            "Connected to DB {}. Found {} keys (cursor {}).",
                             self.selected_db_index,
-                            self.raw_keys.len()
+                            self.raw_keys.len(),
+                            cursor
                         );
-                        self.parse_keys_to_tree(); // Assuming this method exists and works
-                        self.update_visible_keys(); // Update the view
-                        self.connection_status = format!(
-                            "Connected to DB {}. Displaying {} top-level items.",
-                            self.selected_db_index,
-                            self.visible_keys_in_current_view.len()
-                        );
+                        if cursor == 0 {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        self.connection_status = format!("Failed during SCAN: {}", e);
+                        break;
                     }
                 }
-                Err(e) => {
-                    self.connection_status = format!("Failed to fetch keys: {}", e);
-                    // Leave key views empty
-                }
             }
-            self.redis_connection = Some(con); // Put the connection back
+            if self.raw_keys.is_empty() {
+                self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
+            } else {
+                self.connection_status = format!(
+                    "Connected to DB {}. Found {} keys. Displaying {} top-level items.",
+                    self.selected_db_index,
+                    self.raw_keys.len(),
+                    self.visible_keys_in_current_view.len()
+                );
+            }
+            self.redis_connection = Some(con);
         } else {
             self.connection_status = "Not connected. Cannot fetch keys.".to_string();
         }
-        // Ensure UI reflects any changes immediately if needed, though drawing is periodic
     }
     
     // Placeholder for parse_keys_to_tree if it doesn't exist or needs adjustment
@@ -376,6 +391,7 @@ impl App {
         }
         self.key_tree = tree;
     }
+
 
     pub fn previous_key_in_view(&mut self) {
         if !self.visible_keys_in_current_view.is_empty() {
