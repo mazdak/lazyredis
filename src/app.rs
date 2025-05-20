@@ -1,5 +1,6 @@
 use crate::config::ConnectionProfile;
-use redis::{Client, Connection, Value, ConnectionLike};
+use redis::{aio::Connection, AsyncCommands, Client, Value};
+use tokio::task;
 use std::collections::HashMap;
 use crossclip::{Clipboard, SystemClipboard}; // Changed from crossclip::Clipboard for directness, though original likely worked.
 use fuzzy_matcher::FuzzyMatcher; // Added import
@@ -72,7 +73,7 @@ pub struct App {
 
 impl App {
     // PASTE the two clipboard functions here
-    pub fn copy_selected_key_name_to_clipboard(&mut self) {
+    pub async fn copy_selected_key_name_to_clipboard(&mut self) {
         self.clipboard_status = None; // Clear previous status
         let mut key_to_copy: Option<String> = None;
 
@@ -90,21 +91,24 @@ impl App {
         // The current logic for `display_name` from `visible_keys_in_current_view` should provide the most relevant name.
 
         if let Some(name) = key_to_copy {
-            match SystemClipboard::new() { // Using SystemClipboard directly
-                Ok(clipboard) => { // clipboard needs to be mut for set_string_contents
-                    match clipboard.set_string_contents(name.clone()) {
-                        Ok(_) => self.clipboard_status = Some(format!("Copied key name '{}' to clipboard!", name)),
-                        Err(e) => self.clipboard_status = Some(format!("Failed to copy key name to clipboard: {}", e)),
-                    }
+            let result = task::spawn_blocking(move || {
+                match SystemClipboard::new() {
+                    Ok(clipboard) => clipboard.set_string_contents(name.clone()).map(|_| name),
+                    Err(e) => Err(e),
                 }
-                Err(e) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+            }).await;
+
+            match result {
+                Ok(Ok(copied)) => self.clipboard_status = Some(format!("Copied key name '{}' to clipboard!", copied)),
+                Ok(Err(e)) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+                Err(e) => self.clipboard_status = Some(format!("Clipboard task failed: {}", e)),
             }
         } else {
             self.clipboard_status = Some("No key selected to copy".to_string());
         }
     }
 
-    pub fn copy_selected_key_value_to_clipboard(&mut self) {
+    pub async fn copy_selected_key_value_to_clipboard(&mut self) {
         self.clipboard_status = None; // Clear previous status
         let mut value_to_copy: Option<String> = None;
 
@@ -153,19 +157,22 @@ impl App {
         }
 
         if let Some(value_str) = value_to_copy {
-            match SystemClipboard::new() {
-                Ok(clipboard) => { 
-                    match clipboard.set_string_contents(value_str.clone()) {
-                        Ok(_) => self.clipboard_status = Some(format!("Copied to clipboard: {}", ellipsize(&value_str, 50))),
-                        Err(e) => self.clipboard_status = Some(format!("Failed to copy value to clipboard: {}", e)),
-                    }
+            let result = task::spawn_blocking(move || {
+                match SystemClipboard::new() {
+                    Ok(clipboard) => clipboard.set_string_contents(value_str.clone()).map(|_| value_str),
+                    Err(e) => Err(e),
                 }
-                Err(e) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+            }).await;
+
+            match result {
+                Ok(Ok(copied)) => self.clipboard_status = Some(format!("Copied to clipboard: {}", ellipsize(&copied, 50))),
+                Ok(Err(e)) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+                Err(e) => self.clipboard_status = Some(format!("Clipboard task failed: {}", e)),
             }
         } // If value_to_copy is None, a status message should have already been set.
     }
 
-    pub fn new(initial_url: &str, initial_profile_name: &str, profiles: Vec<ConnectionProfile>) -> App {
+    pub async fn new(initial_url: &str, initial_profile_name: &str, profiles: Vec<ConnectionProfile>) -> App {
         let mut app = App {
             selected_db_index: 0,
             db_count: 16, // Default Redis DB count
@@ -218,11 +225,11 @@ impl App {
             app.selected_profile_list_index = app.current_profile_index;
         }
 
-        app.connect_to_profile(app.current_profile_index);
+        app.connect_to_profile(app.current_profile_index).await;
         app
     }
 
-    fn connect_to_profile(&mut self, profile_index: usize) {
+    async fn connect_to_profile(&mut self, profile_index: usize) {
         if profile_index >= self.profiles.len() {
             self.connection_status = format!("Error: Profile index {} out of bounds.", profile_index);
             self.redis_client = None;
@@ -237,19 +244,18 @@ impl App {
         match Client::open(profile.url.as_str()) {
             Ok(client) => {
                 self.redis_client = Some(client);
-                match self.redis_client.as_ref().unwrap().get_connection() {
+                match self.redis_client.as_ref().unwrap().get_async_connection().await {
                     Ok(mut connection) => {
-                        // Select the database
                         let db_to_select = profile.db.unwrap_or(self.selected_db_index as u8);
-                        match redis::cmd("SELECT").arg(db_to_select).query::<()>(&mut connection) {
+                        match redis::cmd("SELECT").arg(db_to_select).query_async::<_, ()>(&mut connection).await {
                             Ok(_) => {
-                                self.selected_db_index = db_to_select as usize; // Ensure app state matches selected DB
+                                self.selected_db_index = db_to_select as usize;
                                 self.redis_connection = Some(connection);
                                 self.connection_status = format!(
                                     "Connected to {} ({}), DB {}",
                                     profile.name, profile.url, self.selected_db_index
                                 );
-                                self.fetch_keys_and_build_tree(); // Fetch keys for the new connection
+                                self.fetch_keys_and_build_tree().await;
                             }
                             Err(e) => {
                                 self.connection_status = format!(
@@ -294,7 +300,7 @@ impl App {
     }
 
     // Fetches all keys from Redis using SCAN and incrementally updates the tree and view.
-    fn fetch_keys_and_build_tree(&mut self) {
+    async fn fetch_keys_and_build_tree(&mut self) {
         self.raw_keys.clear();
         self.key_tree.clear();
         self.current_breadcrumb.clear();
@@ -311,7 +317,7 @@ impl App {
                     .arg(cursor)
                     .arg("MATCH").arg("*")
                     .arg("COUNT").arg(1000)
-                    .query::<(u64, Vec<String>)>(&mut con)
+                    .query_async::<_, (u64, Vec<String>)>(&mut con).await
                 {
                     Ok((next_cursor, batch)) => {
                         cursor = next_cursor;
@@ -407,7 +413,7 @@ impl App {
         }
     }
 
-    pub fn activate_selected_key(&mut self) {
+    pub async fn activate_selected_key(&mut self) {
         if self.selected_visible_key_index < self.visible_keys_in_current_view.len() {
             let (display_name, is_folder) = self.visible_keys_in_current_view[self.selected_visible_key_index].clone();
             self.clear_selected_key_info(); // Clear previous key's info
@@ -444,7 +450,7 @@ impl App {
 
                     if let Some(mut con) = self.redis_connection.take() {
                         // Try GET first, as it's common
-                        match redis::cmd("GET").arg(&actual_full_key_name).query::<Option<String>>(&mut con) {
+                        match redis::cmd("GET").arg(&actual_full_key_name).query_async::<_, Option<String>>(&mut con).await {
                             Ok(Some(value)) => { // Successfully got a string
                                 self.selected_key_type = Some("string".to_string());
                                 self.selected_key_value = Some(value);
@@ -467,15 +473,15 @@ impl App {
 
                                 if is_wrong_type_error {
                                     // GET failed due to WRONGTYPE, so fetch the actual type
-                                    match redis::cmd("TYPE").arg(&actual_full_key_name).query::<String>(&mut con) {
+                                    match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<_, String>(&mut con).await {
                                         Ok(key_type) => {
                                             self.selected_key_type = Some(key_type.clone());
                                             match key_type.as_str() {
-                                                "hash" => self.fetch_and_set_hash_value(&actual_full_key_name, &mut con),
-                                                "zset" => self.fetch_and_set_zset_value(&actual_full_key_name, &mut con),
-                                                "list" => self.fetch_and_set_list_value(&actual_full_key_name, &mut con),
-                                                "set" => self.fetch_and_set_set_value(&actual_full_key_name, &mut con),
-                                                "stream" => self.fetch_and_set_stream_value(&actual_full_key_name, &mut con),
+                                                "hash" => self.fetch_and_set_hash_value(&actual_full_key_name, &mut con).await,
+                                                "zset" => self.fetch_and_set_zset_value(&actual_full_key_name, &mut con).await,
+                                                "list" => self.fetch_and_set_list_value(&actual_full_key_name, &mut con).await,
+                                                "set" => self.fetch_and_set_set_value(&actual_full_key_name, &mut con).await,
+                                                "stream" => self.fetch_and_set_stream_value(&actual_full_key_name, &mut con).await,
                                                 _ => {
                                                     self.selected_key_value = Some(format!(
                                                         "Key is of type '{}'. Value view for this type not yet implemented.",
@@ -517,8 +523,8 @@ impl App {
 
     // --- Helper methods for fetching and setting values for specific key types ---
 
-    fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("HGETALL").arg(key_name).query::<Vec<String>>(con) {
+    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("HGETALL").arg(key_name).query_async::<_, Vec<String>>(con).await {
             Ok(pairs) => {
                 if pairs.is_empty() { 
                     self.selected_key_value_hash = Some(Vec::new());
@@ -548,8 +554,8 @@ impl App {
         }
     }
 
-    fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("ZRANGE").arg(key_name).arg(0).arg(-1).arg("WITHSCORES").query::<Vec<String>>(con) {
+    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("ZRANGE").arg(key_name).arg(0).arg(-1).arg("WITHSCORES").query_async::<_, Vec<String>>(con).await {
             Ok(pairs) => {
                 if pairs.is_empty() { 
                     self.selected_key_value_zset = Some(Vec::new());
@@ -589,8 +595,8 @@ impl App {
         }
     }
 
-    fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("LRANGE").arg(key_name).arg(0).arg(-1).query::<Vec<String>>(con) {
+    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("LRANGE").arg(key_name).arg(0).arg(-1).query_async::<_, Vec<String>>(con).await {
             Ok(elements) => {
                 self.selected_key_value_list = Some(elements);
                 self.selected_key_value = None;
@@ -604,8 +610,8 @@ impl App {
         }
     }
 
-    fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("SMEMBERS").arg(key_name).query::<Vec<String>>(con) {
+    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("SMEMBERS").arg(key_name).query_async::<_, Vec<String>>(con).await {
             Ok(members) => {
                 self.selected_key_value_set = Some(members);
                 self.selected_key_value = None;
@@ -619,7 +625,7 @@ impl App {
         }
     }
 
-    fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut Connection) {
+    async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut Connection) {
         const GROUP_NAME: &str = "lazyredis_group"; // Consider making these configurable or dynamic
         const CONSUMER_NAME: &str = "lazyredis_consumer";
 
@@ -627,12 +633,13 @@ impl App {
         // A more robust solution might check the error type specifically for "BUSYGROUP".
         let _ = redis::cmd("XGROUP")
             .arg("CREATE").arg(key_name).arg(GROUP_NAME).arg("$").arg("MKSTREAM")
-            .query::<()>(con); // Error ignored for simplicity here.
+            .query_async::<_, ()>(con).await; // Error ignored for simplicity here.
 
-        match con.req_command(&redis::cmd("XREADGROUP")
+        match redis::cmd("XREADGROUP")
             .arg("GROUP").arg(GROUP_NAME).arg(CONSUMER_NAME)
-            .arg("COUNT").arg(100) // Fetch more entries for a better view
-            .arg("STREAMS").arg(key_name).arg(">")) // Read new messages for this consumer
+            .arg("COUNT").arg(100)
+            .arg("STREAMS").arg(key_name).arg(">")
+            .query_async::<_, Value>(con).await
         {
             Ok(Value::Nil) => {
                 self.selected_key_value_stream = Some(Vec::new()); // No new messages
@@ -873,12 +880,12 @@ impl App {
         }
     }
 
-    pub fn select_profile_and_connect(&mut self) {
+    pub async fn select_profile_and_connect(&mut self) {
         if self.selected_profile_list_index < self.profiles.len() {
             self.current_profile_index = self.selected_profile_list_index;
             self.is_profile_selector_active = false; 
             // The connect_to_profile method will update connection_status and other relevant fields.
-            self.connect_to_profile(self.current_profile_index); 
+            self.connect_to_profile(self.current_profile_index).await;
         }
     }
 
@@ -917,7 +924,7 @@ impl App {
         }
     }
 
-    pub fn next_db(&mut self) {
+    pub async fn next_db(&mut self) {
         if self.db_count > 0 {
             self.selected_db_index = (self.selected_db_index + 1) % (self.db_count as usize);
             self.clear_selected_key_info();
@@ -928,15 +935,15 @@ impl App {
             self.selected_visible_key_index = 0;
             // Re-establish connection or select DB and fetch keys
             if let Some(profile_idx) = self.profiles.iter().position(|p| p.db == Some(self.selected_db_index as u8) || (p.db.is_none() && self.selected_db_index ==0)) {
-                 self.connect_to_profile(profile_idx); // This will eventually call fetch_keys_and_build_tree
+                 self.connect_to_profile(profile_idx).await; // This will eventually call fetch_keys_and_build_tree
             } else {
                 // Attempt to connect to current profile, which should handle DB selection
-                self.connect_to_profile(self.current_profile_index);
+                self.connect_to_profile(self.current_profile_index).await;
             }
         }
     }
 
-    pub fn previous_db(&mut self) {
+    pub async fn previous_db(&mut self) {
         if self.db_count > 0 {
             if self.selected_db_index > 0 {
                 self.selected_db_index -= 1;
@@ -951,9 +958,9 @@ impl App {
             self.selected_visible_key_index = 0;
             // Re-establish connection or select DB and fetch keys
             if let Some(profile_idx) = self.profiles.iter().position(|p| p.db == Some(self.selected_db_index as u8) || (p.db.is_none() && self.selected_db_index ==0)) {
-                 self.connect_to_profile(profile_idx);
+                 self.connect_to_profile(profile_idx).await;
             } else {
-                 self.connect_to_profile(self.current_profile_index);
+                 self.connect_to_profile(self.current_profile_index).await;
             }
         }
     }
@@ -1112,7 +1119,7 @@ impl App {
         }
     }
 
-    pub fn activate_selected_filtered_key(&mut self) {
+    pub async fn activate_selected_filtered_key(&mut self) {
         if self.selected_filtered_key_index < self.filtered_keys_in_current_view.len() {
             let full_key_path = self.filtered_keys_in_current_view[self.selected_filtered_key_index].clone();
             let path_segments: Vec<String> = full_key_path.split(self.key_delimiter).map(|s| s.to_string()).collect();
@@ -1171,7 +1178,7 @@ impl App {
                 if let Some(leaf_name) = leaf_name_if_leaf { // Use the captured leaf_name
                     if let Some(idx) = self.visible_keys_in_current_view.iter().position(|(name, is_folder)| name == &leaf_name && !*is_folder) {
                         self.selected_visible_key_index = idx;
-                        self.activate_selected_key(); // Load its value
+                        self.activate_selected_key().await; // Load its value
                     }
                 }
             } else {

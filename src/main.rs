@@ -37,7 +37,8 @@ struct CliArgs {
 // Add a page size constant for value navigation
 const VALUE_NAVIGATION_PAGE_SIZE: usize = 10;
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let args = CliArgs::parse();
 
     if args.seed || args.purge {
@@ -110,12 +111,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
 
             if args.purge {
-                match purge_redis_data(&profile.url, profile.db.unwrap_or(0)) {
+                match purge_redis_data(&profile.url, profile.db.unwrap_or(0)).await {
                     Ok(_) => println!("Redis purged successfully for profile '{}'.", profile.name),
                     Err(e) => eprintln!("Error purging Redis for profile '{}': {}", profile.name, e),
                 }
             } else {
-                match seed::seed_redis_data(&profile.url, profile.db.unwrap_or(0)) {
+                match seed::seed_redis_data(&profile.url, profile.db.unwrap_or(0)).await {
                     Ok(_) => println!("Redis seeded successfully for profile '{}'.", profile.name),
                     Err(e) => eprintln!("Error seeding Redis for profile '{}': {}", profile.name, e),
                 }
@@ -150,9 +151,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             app_config_tui.profiles.first().map_or("Default".to_string(), |p| p.name.clone()),
         )
     };
-    let app = app::App::new(&initial_url, &initial_profile_name, app_config_tui.profiles.clone());
+    let app = app::App::new(&initial_url, &initial_profile_name, app_config_tui.profiles.clone()).await;
 
-    let res = run_app(&mut terminal, app);
+    let res = run_app(&mut terminal, app).await;
 
     disable_raw_mode()?;
     execute!(
@@ -170,22 +171,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// Purge (flush) all keys in the specified Redis database
-fn purge_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
+async fn purge_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
     println!("Connecting to {} (DB {}) to purge keys...", redis_url, db_index);
     let client = Client::open(redis_url)?;
-    let mut con = client.get_connection()?;
+    let mut con = client.get_async_connection().await?;
 
-    redis::cmd("SELECT").arg(db_index).query::<()>(&mut con)?;
+    redis::cmd("SELECT").arg(db_index).query_async::<_, ()>(&mut con).await?;
     println!("Selected database {}.", db_index);
 
     println!("Purging database {}...", db_index);
-    redis::cmd("FLUSHDB").query::<()>(&mut con)?;
+    redis::cmd("FLUSHDB").query_async::<_, ()>(&mut con).await?;
     println!("Database {} purged.", db_index);
 
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Result<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui::ui(f, &app))?;
 
@@ -200,7 +201,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                             KeyCode::Char('p') | KeyCode::Esc => app.toggle_profile_selector(),
                             KeyCode::Char('j') | KeyCode::Down => app.next_profile_in_list(),
                             KeyCode::Char('k') | KeyCode::Up => app.previous_profile_in_list(),
-                            KeyCode::Enter => app.select_profile_and_connect(),
+                            KeyCode::Enter => app.select_profile_and_connect().await,
                             _ => {}
                         }
                     } else if app.show_delete_confirmation_dialog {
@@ -224,8 +225,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 app.exit_search_mode();
                             }
                             KeyCode::Enter => {
-                                app.activate_selected_filtered_key(); 
-                                app.exit_search_mode(); 
+                                app.activate_selected_filtered_key().await;
+                                app.exit_search_mode();
                             }
                             KeyCode::Down => {
                                 app.select_next_filtered_key();
@@ -246,8 +247,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 }
                                 KeyCode::Char('p') => app.toggle_profile_selector(),
                                 KeyCode::Tab => app.cycle_focus_forward(), 
-                                KeyCode::Char('y') => app.copy_selected_key_name_to_clipboard(), 
-                                KeyCode::Char('Y') => app.copy_selected_key_value_to_clipboard(), 
+                                KeyCode::Char('y') => app.copy_selected_key_name_to_clipboard().await,
+                                KeyCode::Char('Y') => app.copy_selected_key_value_to_clipboard().await,
                                 KeyCode::Char('d') => {
                                     if app.is_key_view_focused {
                                         app.initiate_delete_selected_item();
@@ -259,7 +260,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                     } else if app.is_key_view_focused {
                                         app.next_key_in_view();
                                     } else {
-                                        app.next_db();
+                                        app.next_db().await;
                                     }
                                 }
                                 KeyCode::Char('k') | KeyCode::Up => {
@@ -268,7 +269,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                     } else if app.is_key_view_focused {
                                         app.previous_key_in_view();
                                     } else {
-                                        app.previous_db();
+                                        app.previous_db().await;
                                     }
                                 }
                                 KeyCode::PageDown => { 
@@ -283,7 +284,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 }
                                 KeyCode::Enter => {
                                     if app.is_key_view_focused {
-                                        app.activate_selected_key();
+                                        app.activate_selected_key().await;
                                     } else if !app.is_value_view_focused {
                                         app.is_key_view_focused = true;
                                         app.is_value_view_focused = false;
