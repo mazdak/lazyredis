@@ -1,5 +1,6 @@
 use crate::config::ConnectionProfile;
-use redis::{Client, Connection, Value, ConnectionLike};
+use redis::{aio::Connection, AsyncCommands, Client, Value};
+use tokio::task;
 use std::collections::HashMap;
 use crossclip::{Clipboard, SystemClipboard}; // Changed from crossclip::Clipboard for directness, though original likely worked.
 use fuzzy_matcher::FuzzyMatcher; // Added import
@@ -49,6 +50,8 @@ pub struct App {
     pub value_view_scroll: (u16, u16),
     pub clipboard_status: Option<String>,
     pub current_display_value: Option<String>,
+    pub displayed_value_lines: Option<Vec<String>>, // For multi-line values (hashes, lists, etc.)
+    pub selected_value_sub_index: usize, // Index for selected item in displayed_value_lines
 
     // Fuzzy Search State
     pub is_search_active: bool,
@@ -70,7 +73,7 @@ pub struct App {
 
 impl App {
     // PASTE the two clipboard functions here
-    pub fn copy_selected_key_name_to_clipboard(&mut self) {
+    pub async fn copy_selected_key_name_to_clipboard(&mut self) {
         self.clipboard_status = None; // Clear previous status
         let mut key_to_copy: Option<String> = None;
 
@@ -88,42 +91,88 @@ impl App {
         // The current logic for `display_name` from `visible_keys_in_current_view` should provide the most relevant name.
 
         if let Some(name) = key_to_copy {
-            match SystemClipboard::new() { // Using SystemClipboard directly
-                Ok(clipboard) => { // clipboard needs to be mut for set_string_contents
-                    match clipboard.set_string_contents(name.clone()) {
-                        Ok(_) => self.clipboard_status = Some(format!("Copied key name '{}' to clipboard!", name)),
-                        Err(e) => self.clipboard_status = Some(format!("Failed to copy key name to clipboard: {}", e)),
-                    }
+            let result = task::spawn_blocking(move || {
+                match SystemClipboard::new() {
+                    Ok(clipboard) => clipboard.set_string_contents(name.clone()).map(|_| name),
+                    Err(e) => Err(e),
                 }
-                Err(e) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+            }).await;
+
+            match result {
+                Ok(Ok(copied)) => self.clipboard_status = Some(format!("Copied key name '{}' to clipboard!", copied)),
+                Ok(Err(e)) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+                Err(e) => self.clipboard_status = Some(format!("Clipboard task failed: {}", e)),
             }
         } else {
             self.clipboard_status = Some("No key selected to copy".to_string());
         }
     }
 
-    pub fn copy_selected_key_value_to_clipboard(&mut self) {
+    pub async fn copy_selected_key_value_to_clipboard(&mut self) {
         self.clipboard_status = None; // Clear previous status
-        if let Some(value_str) = &self.current_display_value {
-            if self.active_leaf_key_name.is_some() { // Only copy if a leaf key is active
-                match SystemClipboard::new() {
-                    Ok(clipboard) => { // clipboard needs to be mut
-                        match clipboard.set_string_contents(value_str.clone()) {
-                            Ok(_) => self.clipboard_status = Some("Copied value to clipboard!".to_string()),
-                            Err(e) => self.clipboard_status = Some(format!("Failed to copy value to clipboard: {}", e)),
-                        }
-                    }
-                    Err(e) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+        let mut value_to_copy: Option<String> = None;
+
+        if self.is_value_view_focused {
+            // Value view is focused: copy the selected sub-item
+            if let Some(lines) = &self.displayed_value_lines {
+                if !lines.is_empty() && self.selected_value_sub_index < lines.len() {
+                    value_to_copy = Some(lines[self.selected_value_sub_index].clone());
+                } else {
+                    self.clipboard_status = Some("No specific value item selected to copy.".to_string());
                 }
             } else {
-                self.clipboard_status = Some("No active key value to copy.".to_string()); // Message from app_D, app_C was "No key selected to copy"
+                self.clipboard_status = Some("No multi-line value items to select from.".to_string());
             }
         } else {
-            self.clipboard_status = Some("No value to copy".to_string());
+            // Key view is focused (or no specific sub-item focus): copy the whole value representation
+            if self.active_leaf_key_name.is_some() {
+                if let Some(lines) = &self.displayed_value_lines {
+                    if !lines.is_empty() {
+                        value_to_copy = Some(lines.join("\n"));
+                    } else {
+                        // This case might occur if a complex type is genuinely empty AND update_current_display_value
+                        // decided to set displayed_value_lines = Some(vec![]) instead of current_display_value.
+                        // For instance, an empty hash might be represented by current_display_value = "(empty hash)".
+                        // Let's try current_display_value if displayed_value_lines is Some but empty.
+                        if let Some(cvd) = &self.current_display_value {
+                             // Check if it's a placeholder like "(empty list)" rather than a real value
+                            if !cvd.starts_with("(") || !cvd.ends_with(")") {
+                                value_to_copy = Some(cvd.clone());
+                            } else {
+                                self.clipboard_status = Some(format!("Value is an empty placeholder: {}", cvd));
+                            }
+                        } else {
+                             self.clipboard_status = Some("No value content to copy (displayed_value_lines is empty).".to_string());
+                        }
+                    }
+                } else if let Some(s_val) = &self.current_display_value {
+                    // This handles simple strings, (nil), or error messages in current_display_value
+                    value_to_copy = Some(s_val.clone());
+                } else {
+                    self.clipboard_status = Some("No value available to copy for the selected key.".to_string());
+                }
+            } else {
+                self.clipboard_status = Some("No active key selected to copy value from.".to_string());
+            }
         }
+
+        if let Some(value_str) = value_to_copy {
+            let result = task::spawn_blocking(move || {
+                match SystemClipboard::new() {
+                    Ok(clipboard) => clipboard.set_string_contents(value_str.clone()).map(|_| value_str),
+                    Err(e) => Err(e),
+                }
+            }).await;
+
+            match result {
+                Ok(Ok(copied)) => self.clipboard_status = Some(format!("Copied to clipboard: {}", ellipsize(&copied, 50))),
+                Ok(Err(e)) => self.clipboard_status = Some(format!("Failed to access clipboard: {}", e)),
+                Err(e) => self.clipboard_status = Some(format!("Clipboard task failed: {}", e)),
+            }
+        } // If value_to_copy is None, a status message should have already been set.
     }
 
-    pub fn new(initial_url: &str, initial_profile_name: &str, profiles: Vec<ConnectionProfile>) -> App {
+    pub async fn new(initial_url: &str, initial_profile_name: &str, profiles: Vec<ConnectionProfile>) -> App {
         let mut app = App {
             selected_db_index: 0,
             db_count: 16, // Default Redis DB count
@@ -154,6 +203,8 @@ impl App {
             value_view_scroll: (0, 0),    
             clipboard_status: None, 
             current_display_value: None, 
+            displayed_value_lines: None,
+            selected_value_sub_index: 0,
 
             // Fuzzy Search State
             is_search_active: false,
@@ -174,11 +225,11 @@ impl App {
             app.selected_profile_list_index = app.current_profile_index;
         }
 
-        app.connect_to_profile(app.current_profile_index);
+        app.connect_to_profile(app.current_profile_index).await;
         app
     }
 
-    fn connect_to_profile(&mut self, profile_index: usize) {
+    async fn connect_to_profile(&mut self, profile_index: usize) {
         if profile_index >= self.profiles.len() {
             self.connection_status = format!("Error: Profile index {} out of bounds.", profile_index);
             self.redis_client = None;
@@ -193,19 +244,18 @@ impl App {
         match Client::open(profile.url.as_str()) {
             Ok(client) => {
                 self.redis_client = Some(client);
-                match self.redis_client.as_ref().unwrap().get_connection() {
+                match self.redis_client.as_ref().unwrap().get_async_connection().await {
                     Ok(mut connection) => {
-                        // Select the database
                         let db_to_select = profile.db.unwrap_or(self.selected_db_index as u8);
-                        match redis::cmd("SELECT").arg(db_to_select).query::<()>(&mut connection) {
+                        match redis::cmd("SELECT").arg(db_to_select).query_async::<_, ()>(&mut connection).await {
                             Ok(_) => {
-                                self.selected_db_index = db_to_select as usize; // Ensure app state matches selected DB
+                                self.selected_db_index = db_to_select as usize;
                                 self.redis_connection = Some(connection);
                                 self.connection_status = format!(
                                     "Connected to {} ({}), DB {}",
                                     profile.name, profile.url, self.selected_db_index
                                 );
-                                self.fetch_keys_and_build_tree(); // Fetch keys for the new connection
+                                self.fetch_keys_and_build_tree().await;
                             }
                             Err(e) => {
                                 self.connection_status = format!(
@@ -245,10 +295,12 @@ impl App {
         self.value_view_scroll = (0, 0);
         self.is_value_view_focused = false;
         self.current_display_value = None;
+        self.displayed_value_lines = None;
+        self.selected_value_sub_index = 0;
     }
 
-    // Fetches all keys from Redis and initiates parsing into a tree structure.
-    fn fetch_keys_and_build_tree(&mut self) {
+    // Fetches all keys from Redis using SCAN and incrementally updates the tree and view.
+    async fn fetch_keys_and_build_tree(&mut self) {
         self.raw_keys.clear();
         self.key_tree.clear();
         self.current_breadcrumb.clear();
@@ -258,37 +310,52 @@ impl App {
 
         if let Some(mut con) = self.redis_connection.take() {
             self.connection_status = format!("Fetching keys from DB {}...", self.selected_db_index);
-            // Using KEYS for simplicity in this TUI context. SCAN would be better for production.
-            match redis::cmd("KEYS").arg("*").query::<Vec<String>>(&mut con) {
-                Ok(keys) => {
-                    self.raw_keys = keys;
-                    if self.raw_keys.is_empty() {
-                        self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
-                    } else {
+            let mut cursor: u64 = 0;
+            // Iteratively SCAN to avoid blocking Redis and allow incremental UI updates
+            loop {
+                match redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH").arg("*")
+                    .arg("COUNT").arg(1000)
+                    .query_async::<_, (u64, Vec<String>)>(&mut con).await
+                {
+                    Ok((next_cursor, batch)) => {
+                        cursor = next_cursor;
+                        self.raw_keys.extend(batch);
+                        if !self.raw_keys.is_empty() {
+                            self.parse_keys_to_tree();
+                            self.update_visible_keys();
+                        }
                         self.connection_status = format!(
-                            "Connected to DB {}. Found {} keys. Parsing...",
+                            "Connected to DB {}. Found {} keys (cursor {}).",
                             self.selected_db_index,
-                            self.raw_keys.len()
+                            self.raw_keys.len(),
+                            cursor
                         );
-                        self.parse_keys_to_tree(); // Assuming this method exists and works
-                        self.update_visible_keys(); // Update the view
-                        self.connection_status = format!(
-                            "Connected to DB {}. Displaying {} top-level items.",
-                            self.selected_db_index,
-                            self.visible_keys_in_current_view.len()
-                        );
+                        if cursor == 0 {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        self.connection_status = format!("Failed during SCAN: {}", e);
+                        break;
                     }
                 }
-                Err(e) => {
-                    self.connection_status = format!("Failed to fetch keys: {}", e);
-                    // Leave key views empty
-                }
             }
-            self.redis_connection = Some(con); // Put the connection back
+            if self.raw_keys.is_empty() {
+                self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
+            } else {
+                self.connection_status = format!(
+                    "Connected to DB {}. Found {} keys. Displaying {} top-level items.",
+                    self.selected_db_index,
+                    self.raw_keys.len(),
+                    self.visible_keys_in_current_view.len()
+                );
+            }
+            self.redis_connection = Some(con);
         } else {
             self.connection_status = "Not connected. Cannot fetch keys.".to_string();
         }
-        // Ensure UI reflects any changes immediately if needed, though drawing is periodic
     }
     
     // Placeholder for parse_keys_to_tree if it doesn't exist or needs adjustment
@@ -331,6 +398,7 @@ impl App {
         self.key_tree = tree;
     }
 
+
     pub fn previous_key_in_view(&mut self) {
         if !self.visible_keys_in_current_view.is_empty() {
             let new_idx = if self.selected_visible_key_index > 0 {
@@ -345,7 +413,7 @@ impl App {
         }
     }
 
-    pub fn activate_selected_key(&mut self) {
+    pub async fn activate_selected_key(&mut self) {
         if self.selected_visible_key_index < self.visible_keys_in_current_view.len() {
             let (display_name, is_folder) = self.visible_keys_in_current_view[self.selected_visible_key_index].clone();
             self.clear_selected_key_info(); // Clear previous key's info
@@ -377,10 +445,12 @@ impl App {
                 if let Some(actual_full_key_name) = actual_full_key_name_opt {
                     self.active_leaf_key_name = Some(actual_full_key_name.clone());
                     self.selected_key_type = Some("fetching...".to_string()); 
+                    self.selected_value_sub_index = 0; // Reset sub-index
+                    self.value_view_scroll = (0, 0); // Reset scroll
 
                     if let Some(mut con) = self.redis_connection.take() {
                         // Try GET first, as it's common
-                        match redis::cmd("GET").arg(&actual_full_key_name).query::<Option<String>>(&mut con) {
+                        match redis::cmd("GET").arg(&actual_full_key_name).query_async::<_, Option<String>>(&mut con).await {
                             Ok(Some(value)) => { // Successfully got a string
                                 self.selected_key_type = Some("string".to_string());
                                 self.selected_key_value = Some(value);
@@ -403,15 +473,15 @@ impl App {
 
                                 if is_wrong_type_error {
                                     // GET failed due to WRONGTYPE, so fetch the actual type
-                                    match redis::cmd("TYPE").arg(&actual_full_key_name).query::<String>(&mut con) {
+                                    match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<_, String>(&mut con).await {
                                         Ok(key_type) => {
                                             self.selected_key_type = Some(key_type.clone());
                                             match key_type.as_str() {
-                                                "hash" => self.fetch_and_set_hash_value(&actual_full_key_name, &mut con),
-                                                "zset" => self.fetch_and_set_zset_value(&actual_full_key_name, &mut con),
-                                                "list" => self.fetch_and_set_list_value(&actual_full_key_name, &mut con),
-                                                "set" => self.fetch_and_set_set_value(&actual_full_key_name, &mut con),
-                                                "stream" => self.fetch_and_set_stream_value(&actual_full_key_name, &mut con),
+                                                "hash" => self.fetch_and_set_hash_value(&actual_full_key_name, &mut con).await,
+                                                "zset" => self.fetch_and_set_zset_value(&actual_full_key_name, &mut con).await,
+                                                "list" => self.fetch_and_set_list_value(&actual_full_key_name, &mut con).await,
+                                                "set" => self.fetch_and_set_set_value(&actual_full_key_name, &mut con).await,
+                                                "stream" => self.fetch_and_set_stream_value(&actual_full_key_name, &mut con).await,
                                                 _ => {
                                                     self.selected_key_value = Some(format!(
                                                         "Key is of type '{}'. Value view for this type not yet implemented.",
@@ -453,8 +523,8 @@ impl App {
 
     // --- Helper methods for fetching and setting values for specific key types ---
 
-    fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("HGETALL").arg(key_name).query::<Vec<String>>(con) {
+    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("HGETALL").arg(key_name).query_async::<_, Vec<String>>(con).await {
             Ok(pairs) => {
                 if pairs.is_empty() { 
                     self.selected_key_value_hash = Some(Vec::new());
@@ -484,8 +554,8 @@ impl App {
         }
     }
 
-    fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("ZRANGE").arg(key_name).arg(0).arg(-1).arg("WITHSCORES").query::<Vec<String>>(con) {
+    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("ZRANGE").arg(key_name).arg(0).arg(-1).arg("WITHSCORES").query_async::<_, Vec<String>>(con).await {
             Ok(pairs) => {
                 if pairs.is_empty() { 
                     self.selected_key_value_zset = Some(Vec::new());
@@ -525,8 +595,8 @@ impl App {
         }
     }
 
-    fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("LRANGE").arg(key_name).arg(0).arg(-1).query::<Vec<String>>(con) {
+    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("LRANGE").arg(key_name).arg(0).arg(-1).query_async::<_, Vec<String>>(con).await {
             Ok(elements) => {
                 self.selected_key_value_list = Some(elements);
                 self.selected_key_value = None;
@@ -540,8 +610,8 @@ impl App {
         }
     }
 
-    fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("SMEMBERS").arg(key_name).query::<Vec<String>>(con) {
+    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut Connection) {
+        match redis::cmd("SMEMBERS").arg(key_name).query_async::<_, Vec<String>>(con).await {
             Ok(members) => {
                 self.selected_key_value_set = Some(members);
                 self.selected_key_value = None;
@@ -555,7 +625,7 @@ impl App {
         }
     }
 
-    fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut Connection) {
+    async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut Connection) {
         const GROUP_NAME: &str = "lazyredis_group"; // Consider making these configurable or dynamic
         const CONSUMER_NAME: &str = "lazyredis_consumer";
 
@@ -563,12 +633,13 @@ impl App {
         // A more robust solution might check the error type specifically for "BUSYGROUP".
         let _ = redis::cmd("XGROUP")
             .arg("CREATE").arg(key_name).arg(GROUP_NAME).arg("$").arg("MKSTREAM")
-            .query::<()>(con); // Error ignored for simplicity here.
+            .query_async::<_, ()>(con).await; // Error ignored for simplicity here.
 
-        match con.req_command(&redis::cmd("XREADGROUP")
+        match redis::cmd("XREADGROUP")
             .arg("GROUP").arg(GROUP_NAME).arg(CONSUMER_NAME)
-            .arg("COUNT").arg(100) // Fetch more entries for a better view
-            .arg("STREAMS").arg(key_name).arg(">")) // Read new messages for this consumer
+            .arg("COUNT").arg(100)
+            .arg("STREAMS").arg(key_name).arg(">")
+            .query_async::<_, Value>(con).await
         {
             Ok(Value::Nil) => {
                 self.selected_key_value_stream = Some(Vec::new()); // No new messages
@@ -638,18 +709,21 @@ impl App {
 
     // Method to update self.current_display_value based on current key type and value
     fn update_current_display_value(&mut self) {
+        self.current_display_value = None; // Clear simple display value
+        self.displayed_value_lines = None; // Clear line-based display value
+        self.selected_value_sub_index = 0; // Reset sub-index
+        self.value_view_scroll = (0,0); // Reset scroll for new value display
+
         if self.selected_key_type.as_deref() == Some("hash") {
             if let Some(hash_data) = &self.selected_key_value_hash {
                 if hash_data.is_empty() {
                     self.current_display_value = Some("(empty hash)".to_string());
                 } else {
-                    self.current_display_value = Some(
+                    self.displayed_value_lines = Some(
                         hash_data
                             .iter()
-                            .map(|(k, v)| format!("{}: {}\n", k, v))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|(k, v)| format!("{}: {}", k, v))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
@@ -660,78 +734,72 @@ impl App {
                 if zset_data.is_empty() {
                     self.current_display_value = Some("(empty zset)".to_string());
                 } else {
-                    self.current_display_value = Some(
+                    self.displayed_value_lines = Some(
                         zset_data
                             .iter()
-                            .map(|(member, score)| format!("Score: {} - Member: {}\n", score, member))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|(member, score)| format!("Score: {} - Member: {}", score, member))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
                 self.current_display_value = self.selected_key_value.clone(); // Fallback for ZRANGE error
             }
-        } else if self.selected_key_type.as_deref() == Some("list") { // New List handling
+        } else if self.selected_key_type.as_deref() == Some("list") { 
             if let Some(list_data) = &self.selected_key_value_list {
                 if list_data.is_empty() {
                     self.current_display_value = Some("(empty list)".to_string());
                 } else {
-                    self.current_display_value = Some(
+                    self.displayed_value_lines = Some(
                         list_data
                             .iter()
                             .enumerate()
-                            .map(|(idx, val)| format!("{}: {}\n", idx, val))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|(idx, val)| format!("{}: {}", idx, val))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
                 self.current_display_value = self.selected_key_value.clone(); // Fallback for LRANGE error
             }
-        } else if self.selected_key_type.as_deref() == Some("set") { // New Set handling
+        } else if self.selected_key_type.as_deref() == Some("set") { 
             if let Some(set_data) = &self.selected_key_value_set {
                 if set_data.is_empty() {
                     self.current_display_value = Some("(empty set)".to_string());
                 } else {
-                    // For sets, order is not guaranteed, so just list members.
-                    // Sorting them here for consistent display might be nice for users.
                     let mut sorted_set_data = set_data.clone();
-                    sorted_set_data.sort_unstable(); // Sort for consistent display
-                    self.current_display_value = Some(
+                    sorted_set_data.sort_unstable(); 
+                    self.displayed_value_lines = Some(
                         sorted_set_data
                             .iter()
-                            .map(|val| format!("- {}\n", val))
-                            .collect::<String>()
-                            .trim_end()
-                            .to_string()
+                            .map(|val| format!("- {}", val))
+                            .collect::<Vec<String>>(),
                     );
                 }
             } else {
                 self.current_display_value = self.selected_key_value.clone(); // Fallback for SMEMBERS error
             }
-        } else if self.selected_key_type.as_deref() == Some("stream") { // New Stream handling
+        } else if self.selected_key_type.as_deref() == Some("stream") { 
             if let Some(stream_entries) = &self.selected_key_value_stream {
                 if stream_entries.is_empty() {
                     self.current_display_value = Some("(empty stream or an error occurred fetching entries)".to_string());
                 } else {
-                    let mut display_string = String::new();
+                    let mut lines: Vec<String> = Vec::new();
                     for entry in stream_entries {
-                        display_string.push_str(&format!("ID: {}\n", entry.id));
+                        lines.push(format!("ID: {}", entry.id));
                         if entry.fields.is_empty(){
-                            display_string.push_str("  (no fields)\n");
+                            lines.push("  (no fields)".to_string());
                         } else {
                             for (field, value) in &entry.fields {
-                                display_string.push_str(&format!("  {}: {}\n", field, value));
+                                lines.push(format!("  {}: {}", field, value));
                             }
                         }
-                        display_string.push_str("---\n"); // Separator between entries
+                        lines.push("---".to_string()); // Separator between entries
                     }
-                    self.current_display_value = Some(display_string.trim_end().to_string());
+                    if lines.last().map_or(false, |l| l == "---") { // Remove trailing separator
+                        lines.pop();
+                    }
+                    self.displayed_value_lines = Some(lines);
                 }
             } else {
-                 // This case implies an error during XREADGROUP itself, message should be in selected_key_value
                 self.current_display_value = self.selected_key_value.clone();
             }
         } else {
@@ -812,12 +880,12 @@ impl App {
         }
     }
 
-    pub fn select_profile_and_connect(&mut self) {
+    pub async fn select_profile_and_connect(&mut self) {
         if self.selected_profile_list_index < self.profiles.len() {
             self.current_profile_index = self.selected_profile_list_index;
             self.is_profile_selector_active = false; 
             // The connect_to_profile method will update connection_status and other relevant fields.
-            self.connect_to_profile(self.current_profile_index); 
+            self.connect_to_profile(self.current_profile_index).await;
         }
     }
 
@@ -845,25 +913,6 @@ impl App {
         }
     }
 
-    pub fn scroll_value_view_down(&mut self, lines: u16) {
-        self.value_view_scroll.0 = self.value_view_scroll.0.saturating_add(lines);
-        // TODO: Consider max scroll based on content height
-    }
-
-    pub fn scroll_value_view_up(&mut self, lines: u16) {
-        self.value_view_scroll.0 = self.value_view_scroll.0.saturating_sub(lines);
-    }
-
-    pub fn scroll_value_view_page_down(&mut self) {
-        let page_size = 10; // Example page size
-        self.scroll_value_view_down(page_size);
-    }
-
-    pub fn scroll_value_view_page_up(&mut self) {
-        let page_size = 10; // Example page size
-        self.scroll_value_view_up(page_size);
-    }
-
     pub fn next_key_in_view(&mut self) {
         if !self.visible_keys_in_current_view.is_empty() {
             let new_idx = (self.selected_visible_key_index + 1) % self.visible_keys_in_current_view.len();
@@ -875,7 +924,7 @@ impl App {
         }
     }
 
-    pub fn next_db(&mut self) {
+    pub async fn next_db(&mut self) {
         if self.db_count > 0 {
             self.selected_db_index = (self.selected_db_index + 1) % (self.db_count as usize);
             self.clear_selected_key_info();
@@ -886,15 +935,15 @@ impl App {
             self.selected_visible_key_index = 0;
             // Re-establish connection or select DB and fetch keys
             if let Some(profile_idx) = self.profiles.iter().position(|p| p.db == Some(self.selected_db_index as u8) || (p.db.is_none() && self.selected_db_index ==0)) {
-                 self.connect_to_profile(profile_idx); // This will eventually call fetch_keys_and_build_tree
+                 self.connect_to_profile(profile_idx).await; // This will eventually call fetch_keys_and_build_tree
             } else {
                 // Attempt to connect to current profile, which should handle DB selection
-                self.connect_to_profile(self.current_profile_index);
+                self.connect_to_profile(self.current_profile_index).await;
             }
         }
     }
 
-    pub fn previous_db(&mut self) {
+    pub async fn previous_db(&mut self) {
         if self.db_count > 0 {
             if self.selected_db_index > 0 {
                 self.selected_db_index -= 1;
@@ -909,9 +958,9 @@ impl App {
             self.selected_visible_key_index = 0;
             // Re-establish connection or select DB and fetch keys
             if let Some(profile_idx) = self.profiles.iter().position(|p| p.db == Some(self.selected_db_index as u8) || (p.db.is_none() && self.selected_db_index ==0)) {
-                 self.connect_to_profile(profile_idx);
+                 self.connect_to_profile(profile_idx).await;
             } else {
-                 self.connect_to_profile(self.current_profile_index);
+                 self.connect_to_profile(self.current_profile_index).await;
             }
         }
     }
@@ -1070,7 +1119,7 @@ impl App {
         }
     }
 
-    pub fn activate_selected_filtered_key(&mut self) {
+    pub async fn activate_selected_filtered_key(&mut self) {
         if self.selected_filtered_key_index < self.filtered_keys_in_current_view.len() {
             let full_key_path = self.filtered_keys_in_current_view[self.selected_filtered_key_index].clone();
             let path_segments: Vec<String> = full_key_path.split(self.key_delimiter).map(|s| s.to_string()).collect();
@@ -1129,7 +1178,7 @@ impl App {
                 if let Some(leaf_name) = leaf_name_if_leaf { // Use the captured leaf_name
                     if let Some(idx) = self.visible_keys_in_current_view.iter().position(|(name, is_folder)| name == &leaf_name && !*is_folder) {
                         self.selected_visible_key_index = idx;
-                        self.activate_selected_key(); // Load its value
+                        self.activate_selected_key().await; // Load its value
                     }
                 }
             } else {
@@ -1139,5 +1188,51 @@ impl App {
 
             self.exit_search_mode();
         }
+    }
+
+    // New value navigation methods
+    pub fn select_next_value_item(&mut self) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                self.selected_value_sub_index = (self.selected_value_sub_index + 1) % lines.len();
+            }
+        }
+    }
+
+    pub fn select_previous_value_item(&mut self) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                if self.selected_value_sub_index > 0 {
+                    self.selected_value_sub_index -= 1;
+                } else {
+                    self.selected_value_sub_index = lines.len() - 1;
+                }
+            }
+        }
+    }
+
+    pub fn select_page_down_value_item(&mut self, page_size: usize) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                self.selected_value_sub_index = (self.selected_value_sub_index + page_size).min(lines.len() - 1);
+            }
+        }
+    }
+
+    pub fn select_page_up_value_item(&mut self, page_size: usize) {
+        if let Some(lines) = &self.displayed_value_lines {
+            if !lines.is_empty() {
+                self.selected_value_sub_index = self.selected_value_sub_index.saturating_sub(page_size);
+            }
+        }
+    }
+}
+
+// Helper function for ellipsizing copied content preview (optional)
+fn ellipsize(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        format!("{}...", &text[..max_len.saturating_sub(3)])
     }
 }

@@ -1,6 +1,7 @@
 pub mod app;
 pub mod ui;
 pub mod config;
+pub mod seed;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers},
@@ -13,58 +14,118 @@ use ratatui::{
 };
 use std::{error::Error, io, time::Duration};
 use clap::Parser;
-use redis::{Client, Commands};
+use redis::Client;
 use url::Url;
 
 /// A simple TUI for Redis
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct CliArgs {
+    /// Profile name to connect on startup, or to select for seeding/purging
+    #[arg(long, value_name = "PROFILE")]
+    profile: Option<String>,
+
     /// Seed the Redis instance with test data
     #[arg(long)]
     seed: bool,
+
+    /// Purge (delete) all keys in the Redis instance
+    #[arg(long)]
+    purge: bool,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+// Add a page size constant for value navigation
+const VALUE_NAVIGATION_PAGE_SIZE: usize = 10;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let args = CliArgs::parse();
 
-    if args.seed {
-        println!("Seeding Redis with test data...");
+    if args.seed || args.purge {
+        let action = if args.purge { "purge" } else { "seed" };
+        let verb = if args.purge { "Purging" } else { "Seeding" };
+        let noun = if args.purge { "keys" } else { "with test data" };
+        println!("{} Redis {}...", verb, noun);
         let app_config = config::Config::load();
 
-        let target_profile = app_config.profiles.iter().find(|p| {
-            p.dev.unwrap_or(false) ||
-            if let Ok(url) = Url::parse(&p.url) {
-                url.host_str().map_or(false, |host| host == "localhost" || host == "127.0.0.1")
-            } else {
-                false
-            }
-        }).or_else(|| {
-            app_config.profiles.first()
-        });
+        let target_profile = if let Some(profile_name) = &args.profile {
+            app_config
+                .profiles
+                .iter()
+                .find(|p| &p.name == profile_name)
+                .or_else(|| {
+                    eprintln!("Profile '{}' not found in configuration.", profile_name);
+                    std::process::exit(1);
+                })
+        } else {
+            app_config
+                .profiles
+                .iter()
+                .find(|p| {
+                    p.dev.unwrap_or(false)
+                        || if let Ok(url) = Url::parse(&p.url) {
+                            url.host_str()
+                                .map_or(false, |host| host == "localhost" || host == "127.0.0.1")
+                        } else {
+                            false
+                        }
+                })
+                .or_else(|| app_config.profiles.first())
+        };
 
         if let Some(profile) = target_profile {
-            println!("Targeting profile: {} ({}) for seeding.", profile.name, profile.url);
-            
-            println!("This will delete ALL KEYS in database {} on {} and add a large amount of test data.", profile.db.unwrap_or(0), profile.url);
+            if !profile.dev.unwrap_or(false) {
+                eprintln!(
+                    "Profile '{}' is not marked dev=true; refusing to {}.",
+                    profile.name,
+                    action
+                );
+                std::process::exit(1);
+            }
+
+            println!(
+                "Targeting profile: {} ({}) for {}.",
+                profile.name,
+                profile.url,
+                action
+            );
+            if args.purge {
+                println!(
+                    "This will delete ALL KEYS in database {} on {}.",
+                    profile.db.unwrap_or(0),
+                    profile.url
+                );
+            } else {
+                println!(
+                    "This will delete ALL KEYS in database {} on {} and add a large amount of test data.",
+                    profile.db.unwrap_or(0),
+                    profile.url
+                );
+            }
             println!("Are you sure you want to proceed? (yes/no)");
             let mut confirmation = String::new();
             io::stdin().read_line(&mut confirmation)?;
             if confirmation.trim().to_lowercase() != "yes" {
-                println!("Seeding cancelled by user.");
+                println!("{} cancelled by user.", if args.purge { "Purge" } else { "Seeding" });
                 return Ok(());
             }
 
-            match seed_redis_data(&profile.url, profile.db.unwrap_or(0)) {
-                Ok(_) => {
-                    println!("Redis seeded successfully for profile '{}'.", profile.name);
+            if args.purge {
+                match purge_redis_data(&profile.url, profile.db.unwrap_or(0)).await {
+                    Ok(_) => println!("Redis purged successfully for profile '{}'.", profile.name),
+                    Err(e) => eprintln!("Error purging Redis for profile '{}': {}", profile.name, e),
                 }
-                Err(e) => {
-                    eprintln!("Error seeding Redis for profile '{}': {}", profile.name, e);
+            } else {
+                match seed::seed_redis_data(&profile.url, profile.db.unwrap_or(0)).await {
+                    Ok(_) => println!("Redis seeded successfully for profile '{}'.", profile.name),
+                    Err(e) => eprintln!("Error seeding Redis for profile '{}': {}", profile.name, e),
                 }
             }
         } else {
-            eprintln!("No suitable profile found for seeding (dev=true or localhost/127.0.0.1). Please check your lazyredis.toml");
+            eprintln!(
+                "No suitable profile found for {} (dev=true or localhost/127.0.0.1). Please check your lazyredis.toml",
+                action
+            );
         }
         return Ok(());
     }
@@ -76,11 +137,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let app_config_tui = config::Config::load();
-    let initial_url = app_config_tui.profiles.first().map_or("redis://127.0.0.1:6379", |p| &p.url).to_string();
-    let initial_profile_name = app_config_tui.profiles.first().map_or("Default", |p| &p.name).to_string();
-    let app = app::App::new(&initial_url, &initial_profile_name, app_config_tui.profiles.clone());
+    let (initial_url, initial_profile_name) = if let Some(profile_name) = &args.profile {
+        match app_config_tui.profiles.iter().find(|p| &p.name == profile_name) {
+            Some(p) => (p.url.clone(), p.name.clone()),
+            None => {
+                eprintln!("Profile '{}' not found in configuration.", profile_name);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        (
+            app_config_tui.profiles.first().map_or("redis://127.0.0.1:6379".to_string(), |p| p.url.clone()),
+            app_config_tui.profiles.first().map_or("Default".to_string(), |p| p.name.clone()),
+        )
+    };
+    let app = app::App::new(&initial_url, &initial_profile_name, app_config_tui.profiles.clone()).await;
 
-    let res = run_app(&mut terminal, app);
+    let res = run_app(&mut terminal, app).await;
 
     disable_raw_mode()?;
     execute!(
@@ -97,121 +170,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn seed_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
-    println!("Connecting to {} (DB {}) to seed data...", redis_url, db_index);
+/// Purge (flush) all keys in the specified Redis database
+async fn purge_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
+    println!("Connecting to {} (DB {}) to purge keys...", redis_url, db_index);
     let client = Client::open(redis_url)?;
-    let mut con = client.get_connection()?;
+    let mut con = client.get_async_connection().await?;
 
-    redis::cmd("SELECT").arg(db_index).query::<()>(&mut con)?;
+    redis::cmd("SELECT").arg(db_index).query_async::<_, ()>(&mut con).await?;
     println!("Selected database {}.", db_index);
 
-    println!("Flushing database {}...", db_index);
-    redis::cmd("FLUSHDB").query::<()>(&mut con)?;
-    println!("Database {} flushed.", db_index);
+    println!("Purging database {}...", db_index);
+    redis::cmd("FLUSHDB").query_async::<_, ()>(&mut con).await?;
+    println!("Database {} purged.", db_index);
 
-    println!("Seeding a large volume of keys...");
-
-    for i in 0..1000 {
-        let _: () = con.set(format!("seed:simple:{}", i), format!("Simple value {}", i))?;
-    }
-    if 1000 % 100 == 0 { println!("Seeded 1000 simple keys...");}
-
-    for i in 0..50 {
-        for j in 0..20 {
-            for k in 0..10 {
-                let key = format!("seed:level1:{}:level2:{}:key:{}", i, j, k);
-                let _: () = con.set(&key, format!("Value for {}", key))?;
-            }
-        }
-        if (i+1) % 10 == 0 { println!("Seeded hierarchy for level1 up to {}...", i+1); }
-    }
-    println!("Seeded nested keys (50*20*10 = 10,000 keys).");
-
-    for i in 0..100 {
-        let _: () = con.set(format!("seed/path/num_{}", i), format!("Path value {}", i))?;
-        let _: () = con.set(format!("seed.dot.num_{}", i), format!("Dot value {}", i))?;
-        let _: () = con.set(format!("seed-dash-num_{}", i), format!("Dash value {}", i))?;
-    }
-    println!("Seeded 300 keys with various delimiters.");
-
-    for i in 0..50 {
-        let mut fields = Vec::new();
-        for j in 0..200 {
-            fields.push((format!("field_{}", j), format!("value_for_hash_{}_field_{}", i, j)));
-        }
-        let _: () = con.hset_multiple(format!("seed:large_hash:{}", i), &fields)?;
-        if (i+1) % 10 == 0 { println!("Seeded large hash {}...", i+1); }
-    }
-    println!("Seeded 50 large hashes (50 * 200 fields).");
-
-    for i in 0..50 {
-        let mut items = Vec::new();
-        for j in 0..500 {
-            items.push(format!("list_{}_item_{}", i, j));
-        }
-        let _: () = con.rpush(format!("seed:large_list:{}", i), items)?;
-        if (i+1) % 10 == 0 { println!("Seeded large list {}...", i+1); }
-    }
-    println!("Seeded 50 large lists (50 * 500 items).");
-    
-    for i in 0..50 {
-        let mut members = Vec::new();
-        for j in 0..300 {
-            members.push(format!("set_{}_member_{}", i, j));
-        }
-        let _: () = con.sadd(format!("seed:large_set:{}", i), members)?;
-         if (i+1) % 10 == 0 { println!("Seeded large set {}...", i+1); }
-    }
-    println!("Seeded 50 large sets (50 * 300 members).");
-
-    for i in 0..50 {
-        let mut members_scores = Vec::new();
-        for j in 0..400 {
-            members_scores.push(((j * 10) as f64, format!("zset_{}_member_{}", i, j)));
-        }
-        let _: () = con.zadd_multiple(format!("seed:large_zset:{}", i), &members_scores)?;
-        if (i+1) % 10 == 0 { println!("Seeded large zset {}...", i+1); }
-    }
-    println!("Seeded 50 large zsets (50 * 400 members/scores).");
-
-    for i in 0..10 {
-        for j in 0..1000 {
-            let _: String = con.xadd(format!("seed:large_stream:{}", i), "*", &[
-                ("event_id", format!("{}-{}", i, j)),
-                ("sensor_id", format!("sensor_{}", i % 5)),
-                ("timestamp", (j * 1000).to_string()),
-                ("payload", format!("Some data payload for event {}-{}, could be JSON or any string.", i,j))
-            ])?;
-        }
-        println!("Seeded stream seed:large_stream:{} with 1000 entries.", i);
-    }
-    println!("Seeded 10 streams with 1000 entries each.");
-    
-    println!("Seeding original specific test keys...");
-    let _: () = con.set("seed:string", "Hello from LazyRedis Seeder!")?;
-    let _: () = con.set("seed:another_string", "This string is a bit longer and might require scrolling to see fully in the value panel if it is narrow enough.")?;
-    let _: () = con.hset_multiple("seed:hash", &[("field1", "Value1"), ("field2", "Another Value"), ("long_field_name_for_testing_wrapping", "This value is also quite long to test how wrapping behaves in the TUI for hash values.")])?;
-    let _: () = con.rpush("seed:list", &["Item 1", "Item 2", "Item 3", "Yet another item", "And one more for good measure"])?;
-    let _: () = con.sadd("seed:set", &["MemberA", "MemberB", "MemberC", "MemberD", "MemberE", "MemberA"])?;
-    let _: () = con.zadd_multiple("seed:zset", &[ (10.0, "Ten"), (1.0, "One"), (30.0, "Thirty"), (20.0, "Twenty"), (5.0, "Five"), (100.0, "One Hundred"), (15.0, "Fifteen")])?;
-    let _: String = con.xadd("seed:stream", "*", &[("fieldA", "valueA1"), ("fieldB", "valueB1")])?;
-    let _: String = con.xadd("seed:stream", "*", &[("sensor-id", "1234"), ("temperature", "19.8")])?;
-    let _: String = con.xadd("seed:stream", "*", &[("message", "Hello World"), ("user", "Alice"), ("timestamp", "1678886400000")])?;
-    println!("Seeding empty types for testing views...");
-    let _: () = con.hset("seed:empty_hash", "placeholder_field", "placeholder_value")?;
-    let _: i32 = con.hdel("seed:empty_hash", "placeholder_field")?;
-    let _: () = con.rpush("seed:empty_list", "placeholder")?;
-    let _: String = con.lpop("seed:empty_list", Default::default())?;
-    let _: () = con.sadd("seed:empty_set", "placeholder")?;
-    let _: i32 = con.srem("seed:empty_set", "placeholder")?;
-    let _: () = con.zadd("seed:empty_zset", "placeholder", 1.0)?;
-    let _: i32 = con.zrem("seed:empty_zset", "placeholder")?;
-
-    println!("Finished seeding data.");
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Result<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui::ui(f, &app))?;
 
@@ -226,7 +201,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                             KeyCode::Char('p') | KeyCode::Esc => app.toggle_profile_selector(),
                             KeyCode::Char('j') | KeyCode::Down => app.next_profile_in_list(),
                             KeyCode::Char('k') | KeyCode::Up => app.previous_profile_in_list(),
-                            KeyCode::Enter => app.select_profile_and_connect(),
+                            KeyCode::Enter => app.select_profile_and_connect().await,
                             _ => {}
                         }
                     } else if app.show_delete_confirmation_dialog {
@@ -250,8 +225,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 app.exit_search_mode();
                             }
                             KeyCode::Enter => {
-                                app.activate_selected_filtered_key(); 
-                                app.exit_search_mode(); 
+                                app.activate_selected_filtered_key().await;
+                                app.exit_search_mode();
                             }
                             KeyCode::Down => {
                                 app.select_next_filtered_key();
@@ -272,8 +247,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 }
                                 KeyCode::Char('p') => app.toggle_profile_selector(),
                                 KeyCode::Tab => app.cycle_focus_forward(), 
-                                KeyCode::Char('y') => app.copy_selected_key_name_to_clipboard(), 
-                                KeyCode::Char('Y') => app.copy_selected_key_value_to_clipboard(), 
+                                KeyCode::Char('y') => app.copy_selected_key_name_to_clipboard().await,
+                                KeyCode::Char('Y') => app.copy_selected_key_value_to_clipboard().await,
                                 KeyCode::Char('d') => {
                                     if app.is_key_view_focused {
                                         app.initiate_delete_selected_item();
@@ -281,35 +256,35 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> io::Res
                                 }
                                 KeyCode::Char('j') | KeyCode::Down => {
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_down(1);
+                                        app.select_next_value_item();
                                     } else if app.is_key_view_focused {
                                         app.next_key_in_view();
                                     } else {
-                                        app.next_db();
+                                        app.next_db().await;
                                     }
                                 }
                                 KeyCode::Char('k') | KeyCode::Up => {
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_up(1);
+                                        app.select_previous_value_item();
                                     } else if app.is_key_view_focused {
                                         app.previous_key_in_view();
                                     } else {
-                                        app.previous_db();
+                                        app.previous_db().await;
                                     }
                                 }
                                 KeyCode::PageDown => { 
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_page_down();
+                                        app.select_page_down_value_item(VALUE_NAVIGATION_PAGE_SIZE);
                                     }
                                 }
                                 KeyCode::PageUp => { 
                                     if app.is_value_view_focused {
-                                        app.scroll_value_view_page_up();
+                                        app.select_page_up_value_item(VALUE_NAVIGATION_PAGE_SIZE);
                                     }
                                 }
                                 KeyCode::Enter => {
                                     if app.is_key_view_focused {
-                                        app.activate_selected_key();
+                                        app.activate_selected_key().await;
                                     } else if !app.is_value_view_focused {
                                         app.is_key_view_focused = true;
                                         app.is_value_view_focused = false;
