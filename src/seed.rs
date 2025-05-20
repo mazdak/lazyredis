@@ -1,16 +1,16 @@
 use std::error::Error;
-use redis::{AsyncCommands, Client};
+use redis::{AsyncCommands, Client, aio::MultiplexedConnection};
 
 pub async fn seed_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
     println!("Connecting to {} (DB {}) to seed data...", redis_url, db_index);
     let client = Client::open(redis_url)?;
-    let mut con = client.get_async_connection().await?;
+    let mut con: MultiplexedConnection = client.get_multiplexed_async_connection().await?;
 
-    redis::cmd("SELECT").arg(db_index).query_async::<_, ()>(&mut con).await?;
+    redis::cmd("SELECT").arg(db_index).query_async::<()>(&mut con).await?;
     println!("Selected database {}.", db_index);
 
     println!("Flushing database {}...", db_index);
-    redis::cmd("FLUSHDB").query_async::<_, ()>(&mut con).await?;
+    redis::cmd("FLUSHDB").query_async::<()>(&mut con).await?;
     println!("Database {} flushed.", db_index);
 
     println!("Seeding a large volume of keys...");

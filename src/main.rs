@@ -174,13 +174,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn purge_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
     println!("Connecting to {} (DB {}) to purge keys...", redis_url, db_index);
     let client = Client::open(redis_url)?;
-    let mut con = client.get_async_connection().await?;
+    let mut con = client.get_multiplexed_async_connection().await?;
 
-    redis::cmd("SELECT").arg(db_index).query_async::<_, ()>(&mut con).await?;
+    redis::cmd("SELECT").arg(db_index).query_async::<()>(&mut con).await?;
     println!("Selected database {}.", db_index);
 
     println!("Purging database {}...", db_index);
-    redis::cmd("FLUSHDB").query_async::<_, ()>(&mut con).await?;
+    redis::cmd("FLUSHDB").query_async::<()>(&mut con).await?;
     println!("Database {} purged.", db_index);
 
     Ok(())
@@ -206,9 +206,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                         }
                     } else if app.show_delete_confirmation_dialog {
                         match key.code {
-                            KeyCode::Enter => app.confirm_delete_item(),
+                            KeyCode::Enter => app.confirm_delete_item().await,
                             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => app.cancel_delete_item(),
-                            KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_item(),
+                            KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_item().await,
                             _ => {}
                         }
                     } else if app.is_search_active {

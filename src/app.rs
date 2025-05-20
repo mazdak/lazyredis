@@ -1,5 +1,5 @@
 use crate::config::ConnectionProfile;
-use redis::{aio::Connection, AsyncCommands, Client, Value};
+use redis::{aio::MultiplexedConnection, Client, Value};
 use tokio::task;
 use std::collections::HashMap;
 use crossclip::{Clipboard, SystemClipboard}; // Changed from crossclip::Clipboard for directness, though original likely worked.
@@ -25,7 +25,7 @@ pub struct App {
     pub selected_db_index: usize,
     pub db_count: u8,
     pub redis_client: Option<Client>,
-    pub redis_connection: Option<Connection>,
+    pub redis_connection: Option<MultiplexedConnection>,
     pub connection_status: String,
     pub profiles: Vec<ConnectionProfile>,
     pub current_profile_index: usize,
@@ -244,10 +244,10 @@ impl App {
         match Client::open(profile.url.as_str()) {
             Ok(client) => {
                 self.redis_client = Some(client);
-                match self.redis_client.as_ref().unwrap().get_async_connection().await {
+                match self.redis_client.as_ref().unwrap().get_multiplexed_async_connection().await {
                     Ok(mut connection) => {
                         let db_to_select = profile.db.unwrap_or(self.selected_db_index as u8);
-                        match redis::cmd("SELECT").arg(db_to_select).query_async::<_, ()>(&mut connection).await {
+                        match redis::cmd("SELECT").arg(db_to_select).query_async::<()>(&mut connection).await {
                             Ok(_) => {
                                 self.selected_db_index = db_to_select as usize;
                                 self.redis_connection = Some(connection);
@@ -317,7 +317,7 @@ impl App {
                     .arg(cursor)
                     .arg("MATCH").arg("*")
                     .arg("COUNT").arg(1000)
-                    .query_async::<_, (u64, Vec<String>)>(&mut con).await
+                    .query_async::<(u64, Vec<String>)>(&mut con).await
                 {
                     Ok((next_cursor, batch)) => {
                         cursor = next_cursor;
@@ -450,7 +450,7 @@ impl App {
 
                     if let Some(mut con) = self.redis_connection.take() {
                         // Try GET first, as it's common
-                        match redis::cmd("GET").arg(&actual_full_key_name).query_async::<_, Option<String>>(&mut con).await {
+                        match redis::cmd("GET").arg(&actual_full_key_name).query_async::<Option<String>>(&mut con).await {
                             Ok(Some(value)) => { // Successfully got a string
                                 self.selected_key_type = Some("string".to_string());
                                 self.selected_key_value = Some(value);
@@ -473,7 +473,7 @@ impl App {
 
                                 if is_wrong_type_error {
                                     // GET failed due to WRONGTYPE, so fetch the actual type
-                                    match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<_, String>(&mut con).await {
+                                    match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await {
                                         Ok(key_type) => {
                                             self.selected_key_type = Some(key_type.clone());
                                             match key_type.as_str() {
@@ -523,8 +523,8 @@ impl App {
 
     // --- Helper methods for fetching and setting values for specific key types ---
 
-    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("HGETALL").arg(key_name).query_async::<_, Vec<String>>(con).await {
+    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        match redis::cmd("HGETALL").arg(key_name).query_async::<Vec<String>>(con).await {
             Ok(pairs) => {
                 if pairs.is_empty() { 
                     self.selected_key_value_hash = Some(Vec::new());
@@ -554,8 +554,8 @@ impl App {
         }
     }
 
-    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("ZRANGE").arg(key_name).arg(0).arg(-1).arg("WITHSCORES").query_async::<_, Vec<String>>(con).await {
+    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        match redis::cmd("ZRANGE").arg(key_name).arg(0).arg(-1).arg("WITHSCORES").query_async::<Vec<String>>(con).await {
             Ok(pairs) => {
                 if pairs.is_empty() { 
                     self.selected_key_value_zset = Some(Vec::new());
@@ -595,8 +595,8 @@ impl App {
         }
     }
 
-    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("LRANGE").arg(key_name).arg(0).arg(-1).query_async::<_, Vec<String>>(con).await {
+    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        match redis::cmd("LRANGE").arg(key_name).arg(0).arg(-1).query_async::<Vec<String>>(con).await {
             Ok(elements) => {
                 self.selected_key_value_list = Some(elements);
                 self.selected_key_value = None;
@@ -610,8 +610,8 @@ impl App {
         }
     }
 
-    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut Connection) {
-        match redis::cmd("SMEMBERS").arg(key_name).query_async::<_, Vec<String>>(con).await {
+    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        match redis::cmd("SMEMBERS").arg(key_name).query_async::<Vec<String>>(con).await {
             Ok(members) => {
                 self.selected_key_value_set = Some(members);
                 self.selected_key_value = None;
@@ -625,84 +625,78 @@ impl App {
         }
     }
 
-    async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut Connection) {
-        const GROUP_NAME: &str = "lazyredis_group"; // Consider making these configurable or dynamic
+    async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+        const GROUP_NAME: &str = "lazyredis_group";
         const CONSUMER_NAME: &str = "lazyredis_consumer";
 
-        // Attempt to create the group; ignore error if it already exists.
-        // A more robust solution might check the error type specifically for "BUSYGROUP".
         let _ = redis::cmd("XGROUP")
             .arg("CREATE").arg(key_name).arg(GROUP_NAME).arg("$").arg("MKSTREAM")
-            .query_async::<_, ()>(con).await; // Error ignored for simplicity here.
+            .query_async::<()>(con).await;
 
         match redis::cmd("XREADGROUP")
             .arg("GROUP").arg(GROUP_NAME).arg(CONSUMER_NAME)
             .arg("COUNT").arg(100)
             .arg("STREAMS").arg(key_name).arg(">")
-            .query_async::<_, Value>(con).await
+            .query_async::<Value>(con).await
         {
             Ok(Value::Nil) => {
-                self.selected_key_value_stream = Some(Vec::new()); // No new messages
+                self.selected_key_value_stream = Some(Vec::new());
                 self.selected_key_value = None;
-            }
-            Ok(Value::Array(mut stream_results)) => {
-                if stream_results.is_empty() { // Should be covered by Nil, but as a safeguard
-                    self.selected_key_value_stream = Some(Vec::new());
-                    self.selected_key_value = None;
-                    return;
-                }
-                // XREADGROUP returns an array of streams, each stream is [key_name, entries_array]
-                let stream_data_val = stream_results.swap_remove(0); // We asked for one stream
-                if let Value::Array(mut stream_data_parts) = stream_data_val {
-                    if stream_data_parts.len() == 2 {
-                        let entries_val = stream_data_parts.pop().unwrap(); // entries_array
-                        if let Value::Array(entries_array) = entries_val {
-                            let mut parsed_entries: Vec<StreamEntry> = Vec::new();
-                            for entry_value in &entries_array {
-                                if let Value::Array(entry_parts) = entry_value {
-                                    if entry_parts.len() == 2 {
-                                        if let (Value::BulkString(id_bytes), Value::Array(field_pairs_value)) = (&entry_parts[0], &entry_parts[1]) {
-                                            let entry_id = String::from_utf8_lossy(id_bytes).to_string();
-                                            let mut fields_map: Vec<(String, String)> = Vec::new();
-                                            for i in (0..field_pairs_value.len()).step_by(2) {
-                                                if i + 1 < field_pairs_value.len() {
-                                                    if let (Value::BulkString(f_bytes), Value::BulkString(v_bytes)) = (&field_pairs_value[i], &field_pairs_value[i+1]) {
-                                                        fields_map.push((
-                                                            String::from_utf8_lossy(f_bytes).to_string(),
-                                                            String::from_utf8_lossy(v_bytes).to_string()
-                                                        ));
-                                                    } else { /* Malformed field/value pair */ break; }
-                                                } else { /* Malformed field pairs (odd number) */ break; }
+                self.current_display_value = Some("(empty stream or no new messages)".to_string());
+                self.displayed_value_lines = None;
+            },
+            Ok(Value::Array(stream_data)) => { // XREADGROUP returns an array (Vec<Value>)
+                let mut parsed_streams: Vec<StreamEntry> = Vec::new();
+                // Expected structure: [ [stream_name, [ [message_id, [field1, value1, ...]], ... ]] ]
+                // Each element of stream_data is a stream's result
+                for single_stream_result in stream_data {
+                    if let Value::Array(stream_specific_data) = single_stream_result {
+                        if stream_specific_data.len() == 2 {
+                            // stream_specific_data[0] is the stream name (Value::BulkString)
+                            // stream_specific_data[1] is an Array of messages (Value::Array)
+                            if let Value::Array(messages) = &stream_specific_data[1] {
+                                for message_val in messages {
+                                    if let Value::Array(message_parts) = message_val { // Each message is an array [message_id, fields_array]
+                                        if message_parts.len() == 2 {
+                                            if let Value::BulkString(id_bytes) = &message_parts[0] { // message_id is BulkString
+                                                let id = String::from_utf8_lossy(id_bytes).to_string();
+                                                // fields_array is Value::Array([field1, value1, field2, value2, ...])
+                                                if let Value::Array(fields_data) = &message_parts[1] {
+                                                    let mut fields = Vec::new();
+                                                    for i in (0..fields_data.len()).step_by(2) {
+                                                        if i + 1 < fields_data.len() {
+                                                            // field and value are BulkString
+                                                            if let (Value::BulkString(f_bytes), Value::BulkString(v_bytes)) = (&fields_data[i], &fields_data[i+1]) {
+                                                                fields.push((
+                                                                    String::from_utf8_lossy(f_bytes).to_string(),
+                                                                    String::from_utf8_lossy(v_bytes).to_string()
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
+                                                    parsed_streams.push(StreamEntry { id, fields });
+                                                }
                                             }
-                                            parsed_entries.push(StreamEntry { id: entry_id, fields: fields_map });
-                                        } else { /* Malformed ID or fields structure */ }
-                                    } else { /* Malformed entry structure */ }
-                                } else { /* Stream entry not an array */ }
+                                        }
+                                    }
+                                }
                             }
-                            if parsed_entries.len() < entries_array.len() && self.selected_key_value.is_none() {
-                                // Partial parse, indicate an issue
-                                self.selected_key_value = Some(format!("Partially parsed stream data for '{}'. Some entries might be malformed.", key_name));
-                            } else if self.selected_key_value.is_none() {
-                                self.selected_key_value = None; // Clear if no errors during parsing.
-                            }
-                            self.selected_key_value_stream = Some(parsed_entries);
-                            return; // Successfully parsed
                         }
                     }
                 }
-                // If we reach here, parsing the XREADGROUP response failed at some point.
-                self.selected_key_value = Some(format!("Malformed XREADGROUP response structure for '{}' (stream).", key_name));
+                self.selected_key_value_stream = Some(parsed_streams);
+                self.selected_key_value = None;
+                self.update_current_display_value(); 
+            },
+            Ok(other_value) => {
                 self.selected_key_value_stream = None;
-            }
-            Ok(_) => { // Any other Value type is unexpected
-                self.selected_key_value = Some(format!("Unexpected XREADGROUP response type for '{}' (stream).", key_name));
-                self.selected_key_value_stream = None;
-            }
+                self.selected_key_value = Some(format!("Unexpected value structure from XREADGROUP: {:?}", other_value));
+                self.update_current_display_value();
+            },
             Err(e) => {
-                self.selected_key_value = Some(format!(
-                    "Failed to XREADGROUP for '{}' (stream): {}", key_name, e
-                ));
                 self.selected_key_value_stream = None;
+                self.selected_key_value = Some(format!("Error fetching stream: {}", e));
+                self.update_current_display_value();
             }
         }
     }
@@ -996,66 +990,102 @@ impl App {
         self.show_delete_confirmation_dialog = true;
     }
 
-    pub fn confirm_delete_item(&mut self) {
-        if !self.show_delete_confirmation_dialog {
-            return;
-        }
-
-        let mut deleted_count = 0;
-        let mut deletion_error: Option<String> = None;
-
-        if let Some(mut con) = self.redis_connection.take() {
-            if self.deletion_is_folder {
-                if let Some(prefix) = self.prefix_to_delete.clone() { // Clone to avoid borrow issues
-                    // For folders, we need to find all keys matching the prefix
-                    match redis::cmd("KEYS").arg(format!("{}*", prefix)).query::<Vec<String>>(&mut con) {
-                        Ok(keys_to_delete) => {
-                            if !keys_to_delete.is_empty() {
-                                match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query::<i32>(&mut con) {
-                                    Ok(count) => deleted_count = count,
-                                    Err(e) => deletion_error = Some(format!("Failed to DEL keys for prefix '{}': {}", prefix, e)),
-                                }
-                            } else {
-                                // No keys matched the prefix, arguably not an error, but nothing deleted.
-                                self.clipboard_status = Some(format!("No keys found matching prefix '{}' to delete.", prefix));
-                            }
-                        }
-                        Err(e) => deletion_error = Some(format!("Failed to KEYS for prefix '{}': {}", prefix, e)),
-                    }
-                }
-            } else if let Some(full_key) = self.key_to_delete_full_path.clone() { // Clone for similar reasons
-                match redis::cmd("DEL").arg(&full_key).query::<i32>(&mut con) {
-                    Ok(count) => deleted_count = count,
-                    Err(e) => deletion_error = Some(format!("Failed to DEL key '{}': {}", full_key, e)),
-                }
-            }
-            self.redis_connection = Some(con);
-        } else {
-            deletion_error = Some("No Redis connection to perform delete.".to_string());
-        }
-
-        if let Some(err_msg) = deletion_error {
-            self.clipboard_status = Some(err_msg); // Use clipboard_status to show error
-        } else if deleted_count > 0 {
-            self.clipboard_status = Some(format!("Successfully deleted {} key(s).", deleted_count));
-            self.fetch_keys_and_build_tree(); // Refresh
-        } else if self.prefix_to_delete.is_some() && deleted_count == 0 && self.clipboard_status.is_none() {
-             // Handled the "No keys matched prefix" case already by setting clipboard_status
-        } else if self.key_to_delete_full_path.is_some() && deleted_count == 0 {
-            self.clipboard_status = Some(format!("Key '{}' not found or already deleted.", self.key_to_delete_display_name.as_deref().unwrap_or("selected")));
-        }
-
-
-        // Reset confirmation state
-        self.cancel_delete_item();
-    }
-
     pub fn cancel_delete_item(&mut self) {
         self.show_delete_confirmation_dialog = false;
         self.key_to_delete_display_name = None;
         self.key_to_delete_full_path = None;
         self.prefix_to_delete = None;
         self.deletion_is_folder = false;
+    }
+
+    pub async fn confirm_delete_item(&mut self) {
+        let result = if self.deletion_is_folder {
+            if let Some(prefix) = self.prefix_to_delete.clone() {
+                self.delete_redis_prefix_async(&prefix).await
+            } else {
+                Err("Prefix to delete was None".to_string())
+            }
+        } else {
+            if let Some(key_path) = self.key_to_delete_full_path.clone() {
+                self.delete_redis_key_async(&key_path).await
+            } else {
+                Err("Key path to delete was None".to_string())
+            }
+        };
+
+        match result {
+            Ok(msg) => self.clipboard_status = Some(msg),
+            Err(e) => self.clipboard_status = Some(format!("Error deleting: {}", e)),
+        }
+        
+        self.show_delete_confirmation_dialog = false;
+        self.key_to_delete_display_name = None;
+        self.key_to_delete_full_path = None;
+        self.prefix_to_delete = None;
+        self.deletion_is_folder = false;
+
+        // After deletion, refresh the keys and UI
+        self.fetch_keys_and_build_tree().await;
+        self.update_visible_keys(); 
+        self.active_leaf_key_name = None; 
+        self.clear_selected_key_info(); 
+    }
+
+    // Helper function to delete all keys matching a prefix
+    async fn delete_redis_prefix_async(&mut self, prefix: &str) -> Result<String, String> {
+        if let Some(mut con) = self.redis_connection.clone() {
+            let pattern = format!("{}{}", prefix, if prefix.ends_with(self.key_delimiter) { "*" } else { "*" });
+            let mut keys_to_delete: Vec<String> = Vec::new();
+            let mut cursor: u64 = 0;
+
+            loop {
+                match redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH").arg(&pattern)
+                    .arg("COUNT").arg(100) 
+                    .query_async::<(u64, Vec<String>)>(&mut con).await // Async query
+                {
+                    Ok((next_cursor, batch)) => {
+                        keys_to_delete.extend(batch);
+                        if next_cursor == 0 {
+                            break;
+                        }
+                        cursor = next_cursor;
+                    }
+                    Err(e) => return Err(format!("Error scanning keys for prefix {}: {}", prefix, e.to_string())),
+                }
+            }
+            
+            if keys_to_delete.is_empty() {
+                return Ok(format!("No keys found matching prefix '{}'.", prefix));
+            }
+
+            match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query_async::<i32>(&mut con).await { // Async query
+                Ok(count) => Ok(format!("Deleted {} keys matching prefix '{}'.", count, prefix)),
+                Err(e) => Err(format!("Error deleting keys for prefix {}: {}", prefix, e.to_string())),
+            }
+        } else {
+            Err("No Redis connection available for deleting prefix.".to_string())
+        }
+    }
+
+    // Helper function to delete a single key
+    async fn delete_redis_key_async(&mut self, full_key: &str) -> Result<String, String> {
+        if let Some(mut con) = self.redis_connection.clone() { 
+            match redis::cmd("DEL").arg(full_key).query_async::<i32>(&mut con).await { // Async query
+                Ok(count) => {
+                    if count > 0 {
+                        Ok(format!("Deleted key '{}'.", full_key))
+                    } else {
+                        // Key might not exist, which is not an error for DEL operation
+                        Ok(format!("Key '{}' not found or already deleted.", full_key))
+                    }
+                }
+                Err(e) => Err(format!("Error deleting key {}: {}", full_key, e.to_string())),
+            }
+        } else {
+            Err("No Redis connection available for deleting key.".to_string())
+        }
     }
 }
 
