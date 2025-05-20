@@ -81,3 +81,43 @@ impl Config {
         Self::default_config()
     }
 } 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::{env, fs};
+
+    #[test]
+    fn load_creates_default_when_missing() {
+        let dir = tempdir().unwrap();
+        env::set_var("XDG_CONFIG_HOME", dir.path());
+        let cfg = Config::load();
+        let cfg_file = dir.path().join("lazyredis").join("lazyredis.toml");
+        assert!(cfg_file.exists());
+        let on_disk = fs::read_to_string(cfg_file).unwrap();
+        let loaded: Config = toml::from_str(&on_disk).unwrap();
+        assert_eq!(cfg, loaded);
+        assert_eq!(cfg.profiles.len(), 1);
+        assert_eq!(cfg.profiles[0].name, "Default");
+    }
+
+    #[test]
+    fn load_reads_existing_file() {
+        let dir = tempdir().unwrap();
+        env::set_var("XDG_CONFIG_HOME", dir.path());
+        let config_dir = dir.path().join("lazyredis");
+        fs::create_dir_all(&config_dir).unwrap();
+        let cfg_file = config_dir.join("lazyredis.toml");
+        let custom_cfg = Config {
+            profiles: vec![ConnectionProfile {
+                name: "Test".to_string(),
+                url: "redis://localhost:6379".to_string(),
+                db: Some(1),
+                dev: Some(false),
+            }],
+        };
+        fs::write(&cfg_file, toml::to_string(&custom_cfg).unwrap()).unwrap();
+        let loaded = Config::load();
+        assert_eq!(loaded, custom_cfg);
+    }
+}
