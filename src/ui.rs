@@ -118,7 +118,14 @@ fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(db_list_widget, db_list_area, &mut db_list_state);
 
     // Render Status
+    let profile_color = app
+        .profiles
+        .get(app.current_profile_index)
+        .map(|p| p.resolved_color())
+        .unwrap_or(Color::White);
+
     let connection_status_paragraph = Paragraph::new(app.connection_status.as_str())
+        .style(Style::default().fg(profile_color))
         .wrap(Wrap { trim: true })
         .alignment(Alignment::Center); // Center status text
     f.render_widget(connection_status_paragraph, status_area);
@@ -326,18 +333,27 @@ fn draw_profile_selector_modal(f: &mut Frame, app: &App) {
     let area = centered_rect(60, 50, f.area());
     f.render_widget(Clear, area); // Clear the background
 
-    let profiles: Vec<ListItem> = app.profiles.iter().enumerate().map(|(idx, profile)| {
-        let style = if idx == app.selected_profile_list_index {
-            Style::default().fg(Color::Black).bg(Color::White) // Highlight selected
-        } else {
-            Style::default()
-        };
-        ListItem::new(format!("{} ({})", profile.name, profile.url)).style(style)
-    }).collect();
+    let profiles: Vec<ListItem> = app
+        .profiles
+        .iter()
+        .enumerate()
+        .map(|(idx, profile)| {
+            let item_color = profile.resolved_color();
+            let style = if idx == app.selected_profile_list_index {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(item_color)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(item_color)
+            };
+            ListItem::new(format!("{} ({})", profile.name, profile.url)).style(style)
+        })
+        .collect();
 
     let list_widget = List::new(profiles)
         .block(Block::default().borders(Borders::ALL).title("Select Connection Profile (p/Esc to close)"))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Black).bg(Color::White)) // Ensure highlight is visible
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
     
     let mut list_state = ListState::default();

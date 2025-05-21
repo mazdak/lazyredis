@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}};
+use ratatui::style::Color;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct ConnectionProfile {
@@ -7,6 +8,51 @@ pub struct ConnectionProfile {
     pub url: String,
     pub db: Option<u8>,
     pub dev: Option<bool>,
+    pub color: Option<String>,
+}
+
+impl ConnectionProfile {
+    pub fn resolved_color(&self) -> Color {
+        self.color
+            .as_deref()
+            .map(parse_color)
+            .unwrap_or(Color::White)
+    }
+}
+
+fn parse_color(spec: &str) -> Color {
+    match spec.trim().to_lowercase().as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        other => {
+            if let Some(hex) = other.strip_prefix('#') {
+                if hex.len() == 6 {
+                    if let (Ok(r), Ok(g), Ok(b)) = (
+                        u8::from_str_radix(&hex[0..2], 16),
+                        u8::from_str_radix(&hex[2..4], 16),
+                        u8::from_str_radix(&hex[4..6], 16),
+                    ) {
+                        return Color::Rgb(r, g, b);
+                    }
+                }
+            }
+            Color::White
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Default, PartialEq)]
@@ -24,6 +70,7 @@ impl Config {
                     url: "redis://127.0.0.1:6379".to_string(),
                     db: Some(0),
                     dev: Some(true),
+                    color: Some("green".to_string()),
                 }
             ]
         }
@@ -112,6 +159,7 @@ mod tests {
         assert_eq!(cfg, loaded);
         assert_eq!(cfg.profiles.len(), 1);
         assert_eq!(cfg.profiles[0].name, "Default");
+        assert_eq!(cfg.profiles[0].color.as_deref(), Some("green"));
     }
 
     #[test]
@@ -128,6 +176,7 @@ mod tests {
                 url: "redis://localhost:6379".to_string(),
                 db: Some(1),
                 dev: Some(false),
+                color: Some("red".to_string()),
             }],
         };
         fs::write(&cfg_file, toml::to_string(&custom_cfg).unwrap()).unwrap();
