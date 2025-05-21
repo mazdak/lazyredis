@@ -213,7 +213,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                         }
                     } else if app.is_command_prompt_active {
                         match key.code {
-                            KeyCode::Esc => app.close_command_prompt(),
+                            KeyCode::Esc => {
+                                app.close_command_prompt();
+                                terminal.hide_cursor()?;
+                            }
                             KeyCode::Enter => {
                                 app.execute_command_input().await;
                                 app.command_input.clear();
@@ -271,6 +274,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                 }
                                 KeyCode::Char(':') => {
                                     app.open_command_prompt();
+                                    terminal.show_cursor()?;
                                 }
                                 KeyCode::Char('j') | KeyCode::Down => {
                                     if app.is_value_view_focused {
@@ -278,7 +282,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                     } else if app.is_key_view_focused {
                                         app.next_key_in_view();
                                     } else {
-                                        app.next_db().await;
+                                        app.next_db();
                                     }
                                 }
                                 KeyCode::Char('k') | KeyCode::Up => {
@@ -287,7 +291,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                     } else if app.is_key_view_focused {
                                         app.previous_key_in_view();
                                     } else {
-                                        app.previous_db().await;
+                                        app.previous_db();
                                     }
                                 }
                                 KeyCode::PageDown => { 
@@ -303,6 +307,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                 KeyCode::Enter => {
                                     if app.is_key_view_focused {
                                         app.activate_selected_key().await;
+                                    } else if !app.is_value_view_focused && !app.is_key_view_focused {
+                                        app.apply_selected_db().await;
                                     } else if !app.is_value_view_focused {
                                         app.is_key_view_focused = true;
                                         app.is_value_view_focused = false;

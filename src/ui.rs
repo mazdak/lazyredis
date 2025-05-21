@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect, Alignment},
+    layout::{Constraint, Direction, Layout, Rect, Alignment, Position},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear, Wrap},
     Frame,
@@ -276,6 +276,11 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" / "),
             Span::styled("[N]o (Esc)", Style::default().fg(Color::Red)),
         ];
+    } else if !app.is_command_prompt_active {
+        help_spans.extend(vec![
+            Span::raw(" | "),
+            Span::styled(":: cmd", Style::default().fg(Color::Cyan)),
+        ]);
     }
 
 
@@ -374,7 +379,15 @@ fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
     let area = centered_rect(70, 30, f.area());
     f.render_widget(Clear, area);
 
-    let input_line = format!("CMD> {}", app.command_input);
+    let input_line_text = format!("CMD> {}", app.command_input);
+    // Calculate cursor position: area.x + "CMD> ".len() + current command_input length
+    // Ensure cursor position is within the bounds of the modal.
+    let cursor_x = area.x + 6 + app.command_input.chars().count() as u16;
+    let cursor_y = area.y + 3; // Corrected: Was area.y + 4, should be on the input line
+
+    // Only set cursor if the command prompt is active and focused (implicitly handled by modal display)
+    f.set_cursor_position(Position::new(cursor_x, cursor_y));
+
     let output = app.command_output.as_deref().unwrap_or("");
 
     let text = vec![
@@ -384,7 +397,7 @@ fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
         ))
         .alignment(Alignment::Center),
         Line::from("").alignment(Alignment::Center),
-        Line::from(input_line),
+        Line::from(input_line_text),
         Line::from("").alignment(Alignment::Center),
         Line::from(output),
     ];

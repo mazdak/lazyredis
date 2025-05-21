@@ -12,7 +12,7 @@ dynamic dispatch.
 
     * **Delimiter collisions.**
       Keys containing the delimiter (`:`) in unexpected ways may break the tree model. Consider allowing custom delimiters at runtime or escaping.
----------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------
 
 ## 🚀 Feature Suggestions
 
@@ -31,6 +31,6 @@ dynamic dispatch.
     8. **Enhanced metrics/viewer.**
        Show basic Redis `INFO` stats (memory usage, connected clients, ops/sec) in a sidebar or popup.
 
------------------------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------
 
 Let me know which improvements or features you’d like to tackle first!
