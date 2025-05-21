@@ -35,15 +35,50 @@ jobs:
           # Get Ubuntu codename from /etc/os-release for robust source configuration
           CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
           echo "Runner Ubuntu Codename: ${CODENAME}"
+          HOST_ARCH=$(dpkg --print-architecture)
+          echo "Runner Host Architecture: ${HOST_ARCH}"
 
           # Replace Azure mirror with official Ubuntu repositories.
           # This helps ensure consistency if the base image uses Azure mirrors.
+          echo "Replacing Azure mirrors with official Ubuntu mirrors..."
           sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
           # Also attempt to replace in any existing sources.list.d files.
-          # Use find with -exec and handle cases where no files are found or sed fails on a specific file.
-          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' {} \; || echo "Sed on sources.list.d files had issues or no files found, continuing."
+          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' {} \; || echo "Sed on sources.list.d files for Azure mirror replacement had issues or no files found, continuing."
 
-          # Initial package list update for the host architecture (amd64)
+          # Restrict existing Ubuntu sources to host architecture to prevent issues when adding foreign architectures.
+          # This ensures that 'apt-get update' after 'dpkg --add-architecture arm64' doesn't try to find arm64 packages
+          # from amd64-focused repositories which might lead to 404 errors.
+          echo "Restricting existing Ubuntu sources in /etc/apt/sources.list to [arch=${HOST_ARCH}]..."
+          sudo sed -i -E "/^deb(-src)?\s+http:\/\/[^[:space:]]*ubuntu\.com/ { /\[arch=/! s/^(deb(-src)?\s+)/\1[arch=${HOST_ARCH}] / }" /etc/apt/sources.list
+          
+          echo "Restricting existing Ubuntu sources in /etc/apt/sources.list.d/ to [arch=${HOST_ARCH}]..."
+          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -print0 | \
+            while IFS= read -r -d $'\0' file; do
+              # Only attempt to modify files that actually contain ubuntu.com source lines and don't already have [arch=arm64] for ports.
+              # This check avoids modifying our own arm64-ports-sources.list if it were created earlier by mistake or in a retry.
+              if grep -q -E "^deb(-src)?\s+http:\/\/[^[:space:]]*ubuntu\.com" "$file" && ! grep -q -E "\[arch=arm64\].*ports\.ubuntu\.com" "$file"; then
+                echo "Modifying $file to restrict to [arch=${HOST_ARCH}] for Ubuntu sources"
+                sudo sed -i -E "/^deb(-src)?\s+http:\/\/[^[:space:]]*ubuntu\.com/ { /\[arch=/! s/^(deb(-src)?\s+)/\1[arch=${HOST_ARCH}] / }" "$file"
+              else
+                echo "Skipping $file for host architecture restriction (either not an Ubuntu source or already arch-specific)."
+              fi
+            done || echo "Processing sources.list.d for arch restriction had issues or no applicable files found, continuing."
+
+          # Debug: Show sources.list content after modification
+          echo "--- /etc/apt/sources.list after host arch restriction (first 20 lines) ---"
+          sudo head -n 20 /etc/apt/sources.list
+          echo "--- Relevant files in /etc/apt/sources.list.d/ after host arch restriction ---"
+          for f_path in $(sudo find /etc/apt/sources.list.d/ -type f -name "*.list" 2>/dev/null || true); do
+            if [ -f "$f_path" ]; then
+              echo "--- Content of $f_path ---"
+              sudo cat "$f_path"
+              echo "----------------------"
+            fi
+          done
+          echo "---------------------------------------------------------------------------"
+
+          # Initial package list update FOR HOST ARCHITECTURE ONLY
+          echo "Updating package lists for host architecture (${HOST_ARCH}) only..."
           sudo apt-get update -y
 
           # Install common dependencies required for both host and possibly for build scripts.
