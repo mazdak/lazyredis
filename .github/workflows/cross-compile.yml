@@ -32,21 +32,62 @@ jobs:
       # Configure repositories and install dependencies
       - name: Configure repositories and install dependencies
         run: |
-          # Replace Azure mirror with official Ubuntu repositories
+          # Get Ubuntu codename from /etc/os-release for robust source configuration
+          CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          echo "Runner Ubuntu Codename: ${CODENAME}"
+
+          # Replace Azure mirror with official Ubuntu repositories.
+          # This helps ensure consistency if the base image uses Azure mirrors.
           sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
-          # Ensure ARM64 architecture is enabled
-          sudo dpkg --add-architecture arm64
-          # Update package lists
-          sudo apt-get update
-          # Install dependencies
-          sudo apt-get install -y libxcb1-dev
+          # Also attempt to replace in any existing sources.list.d files.
+          # Use find with -exec and handle cases where no files are found or sed fails on a specific file.
+          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' {} \; || echo "Sed on sources.list.d files had issues or no files found, continuing."
+
+          # Initial package list update for the host architecture (amd64)
+          sudo apt-get update -y
+
+          # Install common dependencies required for both host and possibly for build scripts.
+          # libxcb1-dev is for the host if building host tools or for native target.
+          # pkg-config is a general build tool.
+          sudo apt-get install -y libxcb1-dev pkg-config
+
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libxcb1-dev:arm64 pkg-config
+            # Add arm64 architecture for cross-compilation
+            sudo dpkg --add-architecture arm64
+
+            # Configure apt sources for arm64 to use ports.ubuntu.com
+            # This is critical as standard mirrors may not carry arm64 packages correctly.
+            # Remove any pre-existing arm64 source list to avoid conflicts.
+            ARM64_SOURCES_FILE="/etc/apt/sources.list.d/arm64-ports-sources.list"
+            sudo rm -f "${ARM64_SOURCES_FILE}"
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main restricted universe multiverse" | sudo tee "${ARM64_SOURCES_FILE}"
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-updates main restricted universe multiverse" | sudo tee -a "${ARM64_SOURCES_FILE}"
+            echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-security main restricted universe multiverse" | sudo tee -a "${ARM64_SOURCES_FILE}"
+            # Optionally, include backports if needed:
+            # echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-backports main restricted universe multiverse" | sudo tee -a "${ARM64_SOURCES_FILE}"
+
+            # Update package lists again to include arm64 sources
+            sudo apt-get update -y
+
+            # Install cross-compiler toolchain and arm64 version of libraries
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libxcb1-dev:arm64
           fi
-          # Debug: Verify ARM64 libraries
+
+          # Debugging: Verify library installation and pkg-config context
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            ls -l /usr/lib/aarch64-linux-gnu/libxcb*
-            pkg-config --libs --cflags xcb
+            echo "--- Debugging for aarch64-unknown-linux-gnu ---"
+            echo "Listing aarch64 libxcb libraries in /usr/lib/aarch64-linux-gnu/:"
+            ls -l /usr/lib/aarch64-linux-gnu/libxcb* || echo "No aarch64 libxcb files found at expected path."
+            echo "Relevant environment variables for Cargo's pkg-config:"
+            echo "  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-<not set>}"
+            echo "  PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=${PKG_CONFIG_PATH_aarch64_unknown_linux_gnu:-<not set>}"
+            echo "  PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=${PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu:-<not set>}"
+            echo "-------------------------------------------------"
+          elif [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+            echo "--- Debugging for x86_64-unknown-linux-gnu ---"
+            echo "Verifying host (x86_64) pkg-config for xcb:"
+            pkg-config --libs --cflags xcb || echo "Host pkg-config check for xcb failed."
+            echo "------------------------------------------------"
           fi
 
       # Build the Rust application
