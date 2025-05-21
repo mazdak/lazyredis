@@ -39,19 +39,22 @@ jobs:
           # Install libxcb for both architectures
           sudo apt-get install -y libxcb1-dev
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libxcb1-dev:arm64
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libxcb1-dev:arm64 pkg-config
           fi
 
       # Build the Rust application
       - name: Build
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          # Configure pkg-config for ARM
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
-          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
+          # Use pkg-config for cross-compilation
+          PKG_CONFIG_aarch64_unknown_linux_gnu: pkg-config
+          PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
+          PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu: /usr/aarch64-linux-gnu
           PKG_CONFIG_ALLOW_CROSS: 1
+          # Add linker flags for ARM
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-L/usr/lib/aarch64-linux-gnu"
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} --verbose
 
       # Upload artifacts
       - name: Upload artifacts
