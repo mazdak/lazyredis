@@ -1,8 +1,11 @@
-name: Cross-Compile
+name: Cross-Compile for Linux
+
 on:
   push:
-    tags:
-      - "v*"
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,12 +29,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Install dependencies for ARM cross-compilation
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      # Install dependencies for cross-compilation and libxcb
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          fi
+          if [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+            sudo apt-get install -y libxcb1-dev
+          fi
 
       # Build the Rust application
       - name: Build
