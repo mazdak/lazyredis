@@ -22,6 +22,13 @@ pub enum KeyTreeNode {
     Leaf { full_key_name: String },
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum SortMode {
+    Name,
+    Ttl,
+    Type,
+}
+
 pub struct App {
     pub selected_db_index: usize,
     pub db_count: u8,
@@ -36,6 +43,10 @@ pub struct App {
     pub key_tree: HashMap<String, KeyTreeNode>,
     pub current_breadcrumb: Vec<String>,
     pub visible_keys_in_current_view: Vec<(String, bool)>,
+    pub ttl_map: HashMap<String, i64>,
+    pub type_map: HashMap<String, String>,
+    pub sort_mode: SortMode,
+    pub show_only_expiring: bool,
     pub selected_visible_key_index: usize,
     pub key_delimiter: char,
     pub is_key_view_focused: bool,
@@ -194,6 +205,10 @@ impl App {
             key_tree: HashMap::new(),
             current_breadcrumb: Vec::new(),
             visible_keys_in_current_view: Vec::new(),
+            ttl_map: HashMap::new(),
+            type_map: HashMap::new(),
+            sort_mode: SortMode::Name,
+            show_only_expiring: false,
             selected_visible_key_index: 0,
             key_delimiter: ':',
             is_key_view_focused: false, 
@@ -366,13 +381,15 @@ impl App {
             if self.raw_keys.is_empty() {
                 self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
             } else {
+                // fetch TTL and type for all keys
+                self.fetch_metadata_for_keys(&mut con).await;
                 self.connection_status = format!(
                     "Connected to DB {}. Found {} keys. Displaying {} top-level items.",
                     self.selected_db_index,
                     self.raw_keys.len(),
                     self.visible_keys_in_current_view.len()
                 );
-            }
+                }
             self.redis_connection = Some(con);
         } else {
             self.connection_status = "Not connected. Cannot fetch keys.".to_string();
@@ -417,6 +434,19 @@ impl App {
             }
         }
         self.key_tree = tree;
+    }
+
+    async fn fetch_metadata_for_keys(&mut self, con: &mut MultiplexedConnection) {
+        self.ttl_map.clear();
+        self.type_map.clear();
+        for key in &self.raw_keys {
+            if let Ok(ttl) = redis::cmd("TTL").arg(key).query_async::<i64>(con).await {
+                self.ttl_map.insert(key.clone(), ttl);
+            }
+            if let Ok(t) = redis::cmd("TYPE").arg(key).query_async::<String>(con).await {
+                self.type_map.insert(key.clone(), t);
+            }
+        }
     }
 
 
@@ -891,23 +921,80 @@ impl App {
             }
         }
 
-        self.visible_keys_in_current_view = current_level.iter().map(|(name, node)| {
-            let display_name = match node {
-                KeyTreeNode::Folder(_) => format!("{}/", name),
-                KeyTreeNode::Leaf { .. } => name.clone(),
-            };
-            (display_name, matches!(node, KeyTreeNode::Folder(_)))
-        }).collect();
-
-        // Sort, folders first, then by name
-        self.visible_keys_in_current_view.sort_by(|(name_a, is_folder_a), (name_b, is_folder_b)| {
-            match (is_folder_a, is_folder_b) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => name_a.cmp(name_b),
-            }
-        });
+        self.visible_keys_in_current_view = current_level
+            .iter()
+            .map(|(name, node)| {
+                let display_name = match node {
+                    KeyTreeNode::Folder(_) => format!("{}/", name),
+                    KeyTreeNode::Leaf { .. } => name.clone(),
+                };
+                (display_name, matches!(node, KeyTreeNode::Folder(_)))
+            })
+            .collect();
+        self.sort_visible_keys();
         self.selected_visible_key_index = 0;
+    }
+
+    fn sort_visible_keys(&mut self) {
+        match self.sort_mode {
+            SortMode::Name => self.visible_keys_in_current_view.sort_by(|(a_name, a_folder), (b_name, b_folder)| {
+                match (a_folder, b_folder) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a_name.cmp(b_name),
+                }
+            }),
+            SortMode::Ttl => {
+                let delim = self.key_delimiter.to_string();
+                self.visible_keys_in_current_view.sort_by(|(a_name, a_folder), (b_name, b_folder)| {
+                    match (a_folder, b_folder) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => {
+                            let mut a_parts = self.current_breadcrumb.clone();
+                            a_parts.push(a_name.trim_end_matches('/').to_string());
+                            let a_full = a_parts.join(&delim);
+                            let mut b_parts = self.current_breadcrumb.clone();
+                            b_parts.push(b_name.trim_end_matches('/').to_string());
+                            let b_full = b_parts.join(&delim);
+                            let a_ttl = self.ttl_map.get(&a_full).copied().unwrap_or(i64::MAX);
+                            let b_ttl = self.ttl_map.get(&b_full).copied().unwrap_or(i64::MAX);
+                            a_ttl.cmp(&b_ttl)
+                        }
+                    }
+                });
+            }
+            SortMode::Type => {
+                let delim = self.key_delimiter.to_string();
+                self.visible_keys_in_current_view.sort_by(|(a_name, a_folder), (b_name, b_folder)| {
+                    match (a_folder, b_folder) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => {
+                            let mut a_parts = self.current_breadcrumb.clone();
+                            a_parts.push(a_name.trim_end_matches('/').to_string());
+                            let a_full = a_parts.join(&delim);
+                            let mut b_parts = self.current_breadcrumb.clone();
+                            b_parts.push(b_name.trim_end_matches('/').to_string());
+                            let b_full = b_parts.join(&delim);
+                            let a_type = self.type_map.get(&a_full).unwrap_or(&"".to_string());
+                            let b_type = self.type_map.get(&b_full).unwrap_or(&"".to_string());
+                            a_type.cmp(b_type)
+                        }
+                    }
+                });
+            }
+        }
+        if self.show_only_expiring {
+            let delim = self.key_delimiter.to_string();
+            self.visible_keys_in_current_view.retain(|(name, is_folder)| {
+                if *is_folder { return true; }
+                let mut parts = self.current_breadcrumb.clone();
+                parts.push(name.clone());
+                let full = parts.join(&delim);
+                self.ttl_map.get(&full).map_or(false, |t| *t > 0)
+            });
+        }
     }
 
     pub fn toggle_profile_selector(&mut self) {
@@ -916,6 +1003,20 @@ impl App {
             // Reset selection to current profile when opening
             self.selected_profile_list_index = self.current_profile_index;
         }
+    }
+
+    pub fn cycle_sort_mode(&mut self) {
+        self.sort_mode = match self.sort_mode {
+            SortMode::Name => SortMode::Ttl,
+            SortMode::Ttl => SortMode::Type,
+            SortMode::Type => SortMode::Name,
+        };
+        self.sort_visible_keys();
+    }
+
+    pub fn toggle_expiring_filter(&mut self) {
+        self.show_only_expiring = !self.show_only_expiring;
+        self.sort_visible_keys();
     }
 
     pub fn next_profile_in_list(&mut self) {

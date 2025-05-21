@@ -1,7 +1,7 @@
-use std::error::Error;
+use anyhow::Result;
 use redis::{AsyncCommands, Client, aio::MultiplexedConnection};
 
-pub async fn seed_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
+pub async fn seed_redis_data(redis_url: &str, db_index: u8) -> Result<()> {
     println!("Connecting to {} (DB {}) to seed data...", redis_url, db_index);
     let client = Client::open(redis_url)?;
     let mut con: MultiplexedConnection = client.get_multiplexed_async_connection().await?;

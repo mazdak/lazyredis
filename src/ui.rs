@@ -155,12 +155,30 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
     let key_items: Vec<ListItem> = if app.is_search_active {
         app.filtered_keys_in_current_view
             .iter()
-            .map(|full_key_name| ListItem::new(full_key_name.as_str()))
+            .map(|full_key_name| {
+                let ttl = app.ttl_map.get(full_key_name).copied().unwrap_or(-2);
+                let ttype = app.type_map.get(full_key_name).cloned().unwrap_or_default();
+                let ttl_disp = if ttl < 0 { "∞".to_string() } else { ttl.to_string() };
+                ListItem::new(format!("{} [{} {}]", full_key_name, ttype, ttl_disp))
+            })
             .collect()
     } else {
+        let delim = app.key_delimiter.to_string();
         app.visible_keys_in_current_view
             .iter()
-            .map(|(name, _is_folder)| ListItem::new(name.as_str()))
+            .map(|(name, is_folder)| {
+                if *is_folder {
+                    ListItem::new(name.as_str())
+                } else {
+                    let mut parts = app.current_breadcrumb.clone();
+                    parts.push(name.clone());
+                    let full = parts.join(&delim);
+                    let ttl = app.ttl_map.get(&full).copied().unwrap_or(-2);
+                    let ttype = app.type_map.get(&full).cloned().unwrap_or_default();
+                    let ttl_disp = if ttl < 0 { "∞".to_string() } else { ttl.to_string() };
+                    ListItem::new(format!("{} [{} {}]", name, ttype, ttl_disp))
+                }
+            })
             .collect()
     };
 
@@ -260,6 +278,10 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("/: search", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
         Span::styled("d: del", Style::default().fg(Color::Yellow)), // Added delete help
+        Span::raw(" | "),
+        Span::styled("s: sort", Style::default().fg(Color::Yellow)),
+        Span::raw(" | "),
+        Span::styled("f: expiring", Style::default().fg(Color::Yellow)),
     ];
 
     if app.is_search_active {

@@ -12,7 +12,8 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     Terminal,
 };
-use std::{error::Error, io, time::Duration};
+use std::{io, time::Duration};
+use anyhow::Result;
 use clap::Parser;
 use redis::Client;
 use url::Url;
@@ -38,7 +39,7 @@ struct CliArgs {
 const VALUE_NAVIGATION_PAGE_SIZE: usize = 10;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<()> {
     let args = CliArgs::parse();
 
     if args.seed || args.purge {
@@ -171,7 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// Purge (flush) all keys in the specified Redis database
-async fn purge_redis_data(redis_url: &str, db_index: u8) -> Result<(), Box<dyn Error>> {
+async fn purge_redis_data(redis_url: &str, db_index: u8) -> Result<()> {
     println!("Connecting to {} (DB {}) to purge keys...", redis_url, db_index);
     let client = Client::open(redis_url)?;
     let mut con = client.get_multiplexed_async_connection().await?;
@@ -270,6 +271,16 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                 KeyCode::Char('d') => {
                                     if app.is_key_view_focused {
                                         app.initiate_delete_selected_item();
+                                    }
+                                }
+                                KeyCode::Char('s') => {
+                                    if app.is_key_view_focused {
+                                        app.cycle_sort_mode();
+                                    }
+                                }
+                                KeyCode::Char('f') => {
+                                    if app.is_key_view_focused {
+                                        app.toggle_expiring_filter();
                                     }
                                 }
                                 KeyCode::Char(':') => {
