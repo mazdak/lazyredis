@@ -1,0 +1,28 @@
+name: Cross-Compile
+on:
+  push:
+    tags:
+      - 'v*'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          override: true
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: |
+          tar -czf lazyredis-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release lazyredis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-binary
+          path: lazyredis-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
