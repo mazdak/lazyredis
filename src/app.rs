@@ -236,11 +236,12 @@ impl App {
             app.selected_profile_list_index = app.current_profile_index;
         }
 
-        app.connect_to_profile(app.current_profile_index).await;
+        // Use the profile's configured DB on first connect
+        app.connect_to_profile(app.current_profile_index, true).await;
         app
     }
 
-    async fn connect_to_profile(&mut self, profile_index: usize) {
+    async fn connect_to_profile(&mut self, profile_index: usize, use_profile_db: bool) {
         if profile_index >= self.profiles.len() {
             self.connection_status = format!("Error: Profile index {} out of bounds.", profile_index);
             self.redis_client = None;
@@ -250,14 +251,23 @@ impl App {
 
         let profile = &self.profiles[profile_index];
         self.connection_status = format!("Connecting to {} ({})...", profile.name, profile.url);
-        self.selected_db_index = profile.db.map_or(self.selected_db_index, |db| db as usize); // Use profile's DB if set, else keep current app selection
+
+        if use_profile_db {
+            if let Some(db) = profile.db {
+                self.selected_db_index = db as usize;
+            }
+        }
 
         match Client::open(profile.url.as_str()) {
             Ok(client) => {
                 self.redis_client = Some(client);
                 match self.redis_client.as_ref().unwrap().get_multiplexed_async_connection().await {
                     Ok(mut connection) => {
-                        let db_to_select = profile.db.unwrap_or(self.selected_db_index as u8);
+                        let db_to_select = if use_profile_db {
+                            profile.db.unwrap_or(self.selected_db_index as u8)
+                        } else {
+                            self.selected_db_index as u8
+                        };
                         match redis::cmd("SELECT").arg(db_to_select).query_async::<()>(&mut connection).await {
                             Ok(_) => {
                                 self.selected_db_index = db_to_select as usize;
@@ -929,7 +939,7 @@ impl App {
             self.current_profile_index = self.selected_profile_list_index;
             self.is_profile_selector_active = false; 
             // The connect_to_profile method will update connection_status and other relevant fields.
-            self.connect_to_profile(self.current_profile_index).await;
+            self.connect_to_profile(self.current_profile_index, true).await;
         }
     }
 
@@ -968,45 +978,31 @@ impl App {
         }
     }
 
-    pub async fn next_db(&mut self) {
+    pub fn next_db(&mut self) {
         if self.db_count > 0 {
             self.selected_db_index = (self.selected_db_index + 1) % (self.db_count as usize);
-            self.clear_selected_key_info();
-            self.current_breadcrumb.clear();
-            self.raw_keys.clear(); // Clear old keys
-            self.key_tree.clear();
-            self.visible_keys_in_current_view.clear();
-            self.selected_visible_key_index = 0;
-            // Re-establish connection or select DB and fetch keys
-            if let Some(profile_idx) = self.profiles.iter().position(|p| p.db == Some(self.selected_db_index as u8) || (p.db.is_none() && self.selected_db_index ==0)) {
-                 self.connect_to_profile(profile_idx).await; // This will eventually call fetch_keys_and_build_tree
-            } else {
-                // Attempt to connect to current profile, which should handle DB selection
-                self.connect_to_profile(self.current_profile_index).await;
-            }
         }
     }
 
-    pub async fn previous_db(&mut self) {
+    pub fn previous_db(&mut self) {
         if self.db_count > 0 {
             if self.selected_db_index > 0 {
                 self.selected_db_index -= 1;
             } else {
                 self.selected_db_index = (self.db_count as usize).saturating_sub(1);
             }
-            self.clear_selected_key_info();
-            self.current_breadcrumb.clear();
-            self.raw_keys.clear();
-            self.key_tree.clear();
-            self.visible_keys_in_current_view.clear();
-            self.selected_visible_key_index = 0;
-            // Re-establish connection or select DB and fetch keys
-            if let Some(profile_idx) = self.profiles.iter().position(|p| p.db == Some(self.selected_db_index as u8) || (p.db.is_none() && self.selected_db_index ==0)) {
-                 self.connect_to_profile(profile_idx).await;
-            } else {
-                 self.connect_to_profile(self.current_profile_index).await;
-            }
         }
+    }
+
+    pub async fn apply_selected_db(&mut self) {
+        self.clear_selected_key_info();
+        self.current_breadcrumb.clear();
+        self.raw_keys.clear();
+        self.key_tree.clear();
+        self.visible_keys_in_current_view.clear();
+        self.selected_visible_key_index = 0;
+        // Reconnect to the current profile without overriding the selected DB
+        self.connect_to_profile(self.current_profile_index, false).await;
     }
 
     pub fn navigate_to_key_tree_root(&mut self) {
@@ -1406,6 +1402,11 @@ mod tests {
             key_to_delete_full_path: None,
             prefix_to_delete: None,
             deletion_is_folder: false,
+
+            // Command prompt state
+            is_command_prompt_active: false,
+            command_input: String::new(),
+            command_output: None,
         }
     }
 
