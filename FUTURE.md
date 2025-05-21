@@ -64,45 +64,19 @@ WITHSCORES`, `LRANGE`, etc.) for hash, zset, list, set, or stream.
 
 ## 🔍 Areas for Improvement (Style, Functionality & Bug-risk)
 
-### 1. Blocking commands & responsiveness
 
-    * **Move to async I/O.**
-      All Redis calls and clipboard access are currently blocking. Switching to `tokio` + `redis::aio::Connection` (with `AsyncCommands`) would keep
-the UI responsive while network I/O completes.
-
-### 2. Code organization & duplication
-
-    * **DRY up fetchers.**
-      The `fetch_and_set_hash/zset/list/...` helpers share similar patterns. A small generic wrapper or macro could reduce boilerplate.
-
-### 3. Error handling
+### Error handling
 
     * **Prefer a richer error type.**
       Rather than `Result<_, Box<dyn Error>>`, consider `anyhow::Result` or a custom error enum (e.g. via `thiserror`) to give more context and avoid
 dynamic dispatch.
-    * **Consistent eprintln! vs UI feedback.**
-      Config-load errors and seeding prompts use `println!`/`eprintln!`, mixing concerns with the TUI code. It may be better to surface all errors
-inside the UI or via a logger.
 
-### 4. UX & corner cases
+
+### UX & corner cases
 
     * **Delimiter collisions.**
       Keys containing the delimiter (`:`) in unexpected ways may break the tree model. Consider allowing custom delimiters at runtime or escaping.
-    * **Clipboard feedback persistence.**
-      The clipboard-status message is transient; in fast workflows it may disappear before the user notices. A ring buffer of recent messages or a
-status log panel could help.
-    * **Dangerous seeding.**
-      The `--seed` workflow drops ALL keys in the first “dev” or localhost profile after a single “yes” confirmation. A second confirmation prompt or
-explicit `--force` might prevent accidents.
-
-### 5. Testing & CI
-
-    * **Lack of automated tests.**
-      There are no unit tests or integration tests. At a minimum, tests for `parse_keys_to_tree` and config loading would safeguard critical logic.
-    * **Pre-commit hooks.**
-      Adding `rustfmt`/`clippy` to CI or a `.pre-commit-config.yaml` would enforce style consistency and catch common mistakes.
-
------------------------------------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------
 
 ## 🚀 Feature Suggestions
 
