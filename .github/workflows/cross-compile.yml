@@ -1,0 +1,188 @@
+name: Cross-Compile Rust App for Linux
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      # Checkout the repository
+      - uses: actions/checkout@v4
+
+      # Cache Rust dependencies to speed up builds
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Install Rust toolchain
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Configure repositories and install dependencies
+      - name: Configure repositories and install dependencies
+        run: |
+          # Get Ubuntu codename from /etc/os-release for robust source configuration
+          CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          echo "Runner Ubuntu Codename: ${CODENAME}"
+          HOST_ARCH=$(dpkg --print-architecture)
+          echo "Runner Host Architecture: ${HOST_ARCH}"
+          UBUNTU_SOURCES_FILE="/etc/apt/sources.list.d/ubuntu.sources" # Standard for Ubuntu 22.04+
+
+          # Replace Azure mirror with official Ubuntu repositories.
+          echo "Replacing Azure mirrors with official Ubuntu mirrors..."
+          if [ -f "${UBUNTU_SOURCES_FILE}" ]; then
+            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "${UBUNTU_SOURCES_FILE}"
+            sudo sed -i 's|azure.ports.ubuntu.com|ports.ubuntu.com|g' "${UBUNTU_SOURCES_FILE}" # if applicable for .sources
+          fi
+          if [ -f "/etc/apt/sources.list" ]; then
+            sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list
+            sudo sed -i 's|azure.ports.ubuntu.com|ports.ubuntu.com|g' /etc/apt/sources.list # if applicable for .list
+          fi
+          # Also attempt to replace in any existing sources.list.d files.
+          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' {} \; || echo "Sed on sources.list.d/*.list for Azure mirror replacement had issues or no files found, continuing."
+          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -exec sudo sed -i 's|azure.ports.ubuntu.com|ports.ubuntu.com|g' {} \; || echo "Sed on sources.list.d/*.list for Azure ports mirror replacement had issues or no files found, continuing."
+
+
+          echo "Configuring APT sources for host architecture (${HOST_ARCH})..."
+          if [ -f "${UBUNTU_SOURCES_FILE}" ]; then
+            echo "Modifying ${UBUNTU_SOURCES_FILE} to restrict to [arch=${HOST_ARCH}] for main Ubuntu repos..."
+            # Backup original sources file
+            sudo cp "${UBUNTU_SOURCES_FILE}" "${UBUNTU_SOURCES_FILE}.bak"
+            # Reconstruct the sources file using echo commands
+            { 
+              echo "Types: deb"
+              echo "URIs: http://archive.ubuntu.com/ubuntu/"
+              echo "Suites: ${CODENAME} ${CODENAME}-updates ${CODENAME}-backports"
+              echo "Components: main restricted universe multiverse"
+              echo "Architectures: ${HOST_ARCH}"
+              echo "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
+              echo ""
+              echo "Types: deb"
+              echo "URIs: http://security.ubuntu.com/ubuntu/"
+              echo "Suites: ${CODENAME}-security"
+              echo "Components: main restricted universe multiverse"
+              echo "Architectures: ${HOST_ARCH}"
+              echo "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
+            } | sudo tee "${UBUNTU_SOURCES_FILE}" > /dev/null
+            echo "Note: ${UBUNTU_SOURCES_FILE} was regenerated. Check .bak file if original non-standard entries were needed."
+
+          elif [ -f "/etc/apt/sources.list" ]; then
+            echo "Restricting existing Ubuntu sources in /etc/apt/sources.list to [arch=${HOST_ARCH}]..."
+            sudo sed -i -E "/^deb(-src)?\\s+http:\\/\\/[^[:space:]]*ubuntu\\.com/ { /\\[arch=/! s/^(deb(-src)?\\s+)/\\1[arch=${HOST_ARCH}] / }" /etc/apt/sources.list
+          else
+            echo "Warning: Neither ${UBUNTU_SOURCES_FILE} nor /etc/apt/sources.list found. APT configuration might be non-standard."
+          fi
+          
+          echo "Restricting other Ubuntu sources in /etc/apt/sources.list.d/*.list to [arch=${HOST_ARCH}]..."
+          sudo find /etc/apt/sources.list.d/ -type f -name "*.list" -print0 | \
+            while IFS= read -r -d $'\0' file; do
+              if [[ "$file" == *"/arm64-ports-sources.list"* ]]; then
+                echo "Skipping $file (our arm64 ports list)."
+                continue
+              fi
+              # Check if the file contains main ubuntu repos, is not already arch-specific for *any* arch, and isn't a ports.ubuntu.com repo
+              if grep -q -E "^deb(-src)?\\s+https?:\\/\\/[^[:space:]]*ubuntu\\.com" "$file" && \
+                 ! grep -q -E "^deb(-src)?\\s+\\[arch=" "$file" && \
+                 ! grep -q -E "ports\\.ubuntu\\.com" "$file"; then
+                echo "Modifying $file to restrict to [arch=${HOST_ARCH}] for Ubuntu sources"
+                sudo sed -i -E "/^deb(-src)?\\s+https?:\\/\\/[^[:space:]]*ubuntu\\.com/ { s/^(deb(-src)?\\s+)/\\1[arch=${HOST_ARCH}] / }" "$file"
+              else
+                echo "Skipping $file for host architecture restriction (e.g., not a main Ubuntu source, already arch-specific, or a ports.ubuntu.com)."
+              fi
+            done || echo "Processing sources.list.d for arch restriction had issues or no applicable files found, continuing."
+
+          # Debug: Show sources.list content after modification
+          echo "--- Main Ubuntu sources file (${UBUNTU_SOURCES_FILE:-/etc/apt/sources.list}) after host arch restriction ---"
+          if [ -f "${UBUNTU_SOURCES_FILE}" ]; then sudo cat "${UBUNTU_SOURCES_FILE}"; elif [ -f "/etc/apt/sources.list" ]; then sudo head -n 20 /etc/apt/sources.list; fi
+          echo "--- Relevant files in /etc/apt/sources.list.d/ after host arch restriction ---"
+          # List all .sources and .list files for thorough debugging
+          sudo find /etc/apt/sources.list.d/ -type f \( -name "*.list" -o -name "*.sources" \) -print0 | \
+            while IFS= read -r -d $'\0' f_path; do
+              echo "--- Content of $f_path ---"
+              sudo cat "$f_path"
+              echo "----------------------"
+            done
+          echo "---------------------------------------------------------------------------"
+
+          # Initial package list update FOR HOST ARCHITECTURE ONLY
+          echo "Updating package lists for host architecture (${HOST_ARCH}) only..."
+          sudo apt-get update -y
+
+          # Install common dependencies required for both host and possibly for build scripts.
+          echo "Installing host architecture dependencies (libxcb1-dev, pkg-config)..."
+          sudo apt-get install -y libxcb1-dev pkg-config
+
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            echo "Setting up for aarch64-unknown-linux-gnu cross-compilation..."
+            sudo dpkg --add-architecture arm64
+
+            ARM64_SOURCES_FILE="/etc/apt/sources.list.d/arm64-ports-sources.list"
+            echo "Configuring APT sources for arm64 architecture in ${ARM64_SOURCES_FILE}..."
+            sudo rm -f "${ARM64_SOURCES_FILE}" # Remove if exists to ensure clean state
+            # Using echo commands to construct the arm64 sources file
+            { 
+              echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main restricted universe multiverse"
+              echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-updates main restricted universe multiverse"
+              echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-security main restricted universe multiverse"
+              # echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-backports main restricted universe multiverse"
+            } | sudo tee "${ARM64_SOURCES_FILE}" > /dev/null
+            echo "APT sources for arm64 configured."
+            echo "--- Content of ${ARM64_SOURCES_FILE} ---"
+            sudo cat "${ARM64_SOURCES_FILE}"
+            echo "--------------------------------------"
+
+            echo "Updating package lists to include arm64 sources..."
+            # It's important that previous apt update for host_arch succeeded and sources are clean
+            sudo apt-get update -y
+
+            echo "Installing arm64 cross-compiler and libraries (gcc-aarch64-linux-gnu, g++-aarch64-linux-gnu, libxcb1-dev:arm64)..."
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libxcb1-dev:arm64
+            echo "Arm64 dependencies installed."
+          fi
+
+          # Debugging: Verify library installation and pkg-config context
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            echo "--- Debugging for aarch64-unknown-linux-gnu ---"
+            echo "Listing aarch64 libxcb libraries in /usr/lib/aarch64-linux-gnu/:"
+            ls -l /usr/lib/aarch64-linux-gnu/libxcb* || echo "No aarch64 libxcb files found at expected path."
+            echo "Relevant environment variables for Cargo's pkg-config:"
+            echo "  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=\${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:-<not set>}"
+            echo "  PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=\${PKG_CONFIG_PATH_aarch64_unknown_linux_gnu:-<not set>}"
+            echo "  PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu=\${PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu:-<not set>}"
+            echo "-------------------------------------------------"
+          elif [[ "${{ matrix.target }}" == "x86_64-unknown-linux-gnu" ]]; then
+            echo "--- Debugging for x86_64-unknown-linux-gnu ---"
+            echo "Verifying host (x86_64) pkg-config for xcb:"
+            pkg-config --libs --cflags xcb || echo "Host pkg-config check for xcb failed."
+            echo "------------------------------------------------"
+          fi
+
+      # Build the Rust application
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_aarch64_unknown_linux_gnu: pkg-config
+          PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
+          PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu: /usr/aarch64-linux-gnu
+          PKG_CONFIG_ALLOW_CROSS: 1
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-L/usr/lib/aarch64-linux-gnu"
+        run: |
+          cargo build --release --target ${{ matrix.target }} --verbose
+
+      # Upload artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/lazyredis
