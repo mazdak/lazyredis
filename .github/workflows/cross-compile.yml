@@ -2,27 +2,47 @@ name: Cross-Compile
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
+
     steps:
+      # Checkout the repository
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+
+      # Cache Rust dependencies to speed up builds
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Install Rust toolchain
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          target: ${{ matrix.target }}
-          override: true
-      - run: cargo build --release --target ${{ matrix.target }}
-      - run: |
-          tar -czf lazyredis-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release lazyredis
-      - uses: actions/upload-artifact@v4
+          targets: ${{ matrix.target }}
+
+      # Install dependencies for ARM cross-compilation
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      # Build the Rust application
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+
+      # Upload artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}-binary
-          path: lazyredis-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          name: lazyredis-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/lazyredis
