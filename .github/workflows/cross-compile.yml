@@ -1,4 +1,4 @@
-name: Cross-Compile for Linux
+name: Cross-Compile Rust App for Linux
 
 on:
   push:
@@ -29,29 +29,34 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Install dependencies for cross-compilation and libxcb
-      - name: Install dependencies
+      # Configure repositories and install dependencies
+      - name: Configure repositories and install dependencies
         run: |
-          sudo apt-get update
-          # Enable multi-arch for arm64
+          # Replace Azure mirror with official Ubuntu repositories
+          sudo sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' /etc/apt/sources.list
+          # Ensure ARM64 architecture is enabled
           sudo dpkg --add-architecture arm64
+          # Update package lists
           sudo apt-get update
-          # Install libxcb for both architectures
+          # Install dependencies
           sudo apt-get install -y libxcb1-dev
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libxcb1-dev:arm64 pkg-config
+          fi
+          # Debug: Verify ARM64 libraries
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            ls -l /usr/lib/aarch64-linux-gnu/libxcb*
+            pkg-config --libs --cflags xcb
           fi
 
       # Build the Rust application
       - name: Build
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          # Use pkg-config for cross-compilation
           PKG_CONFIG_aarch64_unknown_linux_gnu: pkg-config
           PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
           PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu: /usr/aarch64-linux-gnu
           PKG_CONFIG_ALLOW_CROSS: 1
-          # Add linker flags for ARM
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-L/usr/lib/aarch64-linux-gnu"
         run: |
           cargo build --release --target ${{ matrix.target }} --verbose
@@ -60,5 +65,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lazyredis-${{ matrix.target }}
+          name: binary-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/lazyredis
