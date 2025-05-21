@@ -66,6 +66,11 @@ pub struct App {
     pub key_to_delete_full_path: Option<String>, // For leaf keys
     pub prefix_to_delete: Option<String>,      // For folders
     pub deletion_is_folder: bool,
+
+    // Command prompt state
+    pub is_command_prompt_active: bool,
+    pub command_input: String,
+    pub command_output: Option<String>,
 }
 
 // REMOVE clipboard functions from global scope if they are here.
@@ -219,6 +224,11 @@ impl App {
             key_to_delete_full_path: None,
             prefix_to_delete: None,
             deletion_is_folder: false,
+
+            // Command prompt state
+            is_command_prompt_active: false,
+            command_input: String::new(),
+            command_output: None,
         };
 
         if !app.profiles.is_empty() {
@@ -1294,6 +1304,50 @@ impl App {
             if !lines.is_empty() {
                 self.selected_value_sub_index = self.selected_value_sub_index.saturating_sub(page_size);
             }
+        }
+    }
+}
+
+// --- Methods for Custom Command Prompt ---
+impl App {
+    pub fn open_command_prompt(&mut self) {
+        self.is_command_prompt_active = true;
+        self.command_input.clear();
+        self.command_output = Some(
+            "WARNING: This executes arbitrary Redis commands. You are on your own if you do dangerous things.".to_string(),
+        );
+    }
+
+    pub fn close_command_prompt(&mut self) {
+        self.is_command_prompt_active = false;
+        self.command_input.clear();
+    }
+
+    pub async fn execute_command_input(&mut self) {
+        let input = self.command_input.trim();
+        if input.is_empty() {
+            self.command_output = Some("No command entered.".to_string());
+            return;
+        }
+
+        if let Some(mut con) = self.redis_connection.take() {
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.is_empty() {
+                self.command_output = Some("No command entered.".to_string());
+                self.redis_connection = Some(con);
+                return;
+            }
+            let mut cmd = redis::cmd(parts[0]);
+            for arg in &parts[1..] {
+                cmd.arg(arg);
+            }
+            match cmd.query_async::<redis::Value>(&mut con).await {
+                Ok(val) => self.command_output = Some(format!("{:?}", val)),
+                Err(e) => self.command_output = Some(format!("Error: {}", e)),
+            }
+            self.redis_connection = Some(con);
+        } else {
+            self.command_output = Some("Not connected".to_string());
         }
     }
 }

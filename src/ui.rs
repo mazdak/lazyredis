@@ -63,6 +63,9 @@ pub fn ui(f: &mut Frame, app: &App) {
         if app.show_delete_confirmation_dialog {
             draw_delete_confirmation_dialog(f, app);
         }
+        if app.is_command_prompt_active {
+            draw_command_prompt_modal(f, app);
+        }
     }
 }
 
@@ -344,4 +347,28 @@ fn draw_profile_selector_modal(f: &mut Frame, app: &App) {
     list_state.select(Some(app.selected_profile_list_index));
 
     f.render_stateful_widget(list_widget, area, &mut list_state);
-} 
+}
+
+fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
+    let area = centered_rect(70, 30, f.area());
+    f.render_widget(Clear, area);
+
+    let input_line = format!("CMD> {}", app.command_input);
+    let output = app.command_output.as_deref().unwrap_or("");
+
+    let text = vec![
+        Line::from(Span::styled(
+            "Custom Command Prompt - use at your own risk!",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center),
+        Line::from("").alignment(Alignment::Center),
+        Line::from(input_line),
+        Line::from("").alignment(Alignment::Center),
+        Line::from(output),
+    ];
+
+    let block = Block::default().borders(Borders::ALL).title("Command Prompt (: to open, Esc to close)");
+    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+}

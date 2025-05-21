@@ -211,6 +211,21 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                             KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_delete_item().await,
                             _ => {}
                         }
+                    } else if app.is_command_prompt_active {
+                        match key.code {
+                            KeyCode::Esc => app.close_command_prompt(),
+                            KeyCode::Enter => {
+                                app.execute_command_input().await;
+                                app.command_input.clear();
+                            }
+                            KeyCode::Backspace => {
+                                app.command_input.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                app.command_input.push(c);
+                            }
+                            _ => {}
+                        }
                     } else if app.is_search_active {
                         match key.code {
                             KeyCode::Char(c) => {
@@ -253,6 +268,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                     if app.is_key_view_focused {
                                         app.initiate_delete_selected_item();
                                     }
+                                }
+                                KeyCode::Char(':') => {
+                                    app.open_command_prompt();
                                 }
                                 KeyCode::Char('j') | KeyCode::Down => {
                                     if app.is_value_view_focused {
