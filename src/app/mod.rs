@@ -36,6 +36,7 @@ pub enum PendingOperation {
     ConfirmDeleteItem,
     ExecuteCommand,
     ActivateSelectedKey,
+    ActivateSelectedFilteredKey,
     CopyKeyNameToClipboard,
     CopyKeyValueToClipboard,
 }
@@ -293,7 +294,6 @@ impl App {
             if self.raw_keys.is_empty() {
                 self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
             } else {
-                self.fetch_metadata_for_keys(&mut con).await;
                 self.connection_status = format!(
                     "Connected to DB {}. Found {} keys. Displaying {} top-level items.",
                     self.selected_db_index,
@@ -339,20 +339,6 @@ impl App {
         self.key_tree = tree;
     }
 
-    async fn fetch_metadata_for_keys(&mut self, con: &mut MultiplexedConnection) {
-        self.ttl_map.clear();
-        self.type_map.clear();
-        for key in &self.raw_keys {
-            if let Ok(ttl) = redis::cmd("TTL").arg(key).query_async::<i64>(con).await {
-                self.ttl_map.insert(key.clone(), ttl);
-            }
-            if let Ok(t) = redis::cmd("TYPE").arg(key).query_async::<String>(con).await {
-                self.type_map.insert(key.clone(), t);
-            }
-        }
-    }
-
-
     pub fn previous_key_in_view(&mut self) {
         if !self.visible_keys_in_current_view.is_empty() {
             let new_idx = if self.selected_visible_key_index > 0 {
@@ -370,14 +356,13 @@ impl App {
     pub async fn activate_selected_key(&mut self) {
         if self.selected_visible_key_index < self.visible_keys_in_current_view.len() {
             let (display_name, is_folder) = self.visible_keys_in_current_view[self.selected_visible_key_index].clone();
-            self.clear_selected_key_info(); 
-
+            self.clear_selected_key_info();
             if is_folder {
                 let folder_name = display_name.trim_end_matches('/').to_string();
                 self.current_breadcrumb.push(folder_name);
-                self.update_visible_keys(); 
+                self.update_visible_keys();
             } else {
-                let mut current_node_map_for_leaf = &self.key_tree; 
+                let mut current_node_map_for_leaf = &self.key_tree;
                 for segment in &self.current_breadcrumb {
                     if let Some(KeyTreeNode::Folder(sub_map)) = current_node_map_for_leaf.get(segment) {
                         current_node_map_for_leaf = sub_map;
@@ -387,31 +372,33 @@ impl App {
                         return;
                     }
                 }
-                
                 let actual_full_key_name_opt: Option<String> = current_node_map_for_leaf
                     .get(&display_name)
                     .and_then(|node| match node {
                         KeyTreeNode::Leaf { full_key_name } => Some(full_key_name.clone()),
-                        _ => None, 
+                        _ => None,
                     });
-
                 if let Some(actual_full_key_name) = actual_full_key_name_opt {
                     self.active_leaf_key_name = Some(actual_full_key_name.clone());
-                    self.selected_key_type = Some("fetching...".to_string()); 
-                    self.selected_value_sub_index = 0; 
-                    self.value_view_scroll = (0, 0); 
-
+                    self.selected_key_type = Some("fetching...".to_string());
+                    self.selected_value_sub_index = 0;
+                    self.value_view_scroll = (0, 0);
                     if let Some(mut con) = self.redis_connection.take() {
+                        // Fetch TTL and type for the selected key only
+                        let ttl = redis::cmd("TTL").arg(&actual_full_key_name).query_async::<i64>(&mut con).await.unwrap_or(-2);
+                        self.ttl_map.insert(actual_full_key_name.clone(), ttl);
+                        let key_type = redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await.unwrap_or("unknown".to_string());
+                        self.type_map.insert(actual_full_key_name.clone(), key_type.clone());
                         match redis::cmd("GET").arg(&actual_full_key_name).query_async::<Option<String>>(&mut con).await {
-                            Ok(Some(value)) => { 
+                            Ok(Some(value)) => {
                                 self.selected_key_type = Some("string".to_string());
                                 self.selected_key_value = Some(value);
                             }
-                            Ok(None) => { 
+                            Ok(None) => {
                                 self.selected_key_type = Some("string".to_string());
                                 self.selected_key_value = Some("(nil)".to_string());
                             }
-                            Err(e_get) => { 
+                            Err(e_get) => {
                                 let mut is_wrong_type_error = false;
                                 if e_get.kind() == redis::ErrorKind::TypeError {
                                     is_wrong_type_error = true;
@@ -422,7 +409,6 @@ impl App {
                                         }
                                     }
                                 }
-
                                 if is_wrong_type_error {
                                     match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await {
                                         Ok(key_type) => {
@@ -441,7 +427,7 @@ impl App {
                                                 }
                                             }
                                         }
-                                        Err(e_type) => { 
+                                        Err(e_type) => {
                                             self.selected_key_type = Some("error (TYPE failed)".to_string());
                                             self.selected_key_value = Some(format!(
                                                 "GET for '{}' failed (WRONGTYPE). Subsequent TYPE command also failed: {}",
@@ -449,27 +435,27 @@ impl App {
                                             ));
                                         }
                                     }
-                                } else { 
+                                } else {
                                     self.selected_key_type = Some("error (GET failed)".to_string());
                                     self.selected_key_value = Some(format!(
-                                        "Failed to GET key '{}': {} (Kind: {:?}, Code: {:?})", 
+                                        "Failed to GET key '{}': {} (Kind: {:?}, Code: {:?})",
                                         actual_full_key_name, e_get, e_get.kind(), e_get.code()
                                     ));
                                 }
                             }
                         }
-                        self.redis_connection = Some(con); 
-                    } else { 
+                        self.redis_connection = Some(con);
+                    } else {
                         self.selected_key_type = Some("error".to_string());
                         self.selected_key_value = Some("Error: No Redis connection to fetch key value.".to_string());
                     }
-                } else { 
+                } else {
                     self.selected_key_type = Some("error".to_string());
                     self.selected_key_value = Some(format!("Error: Key '{}' not found as leaf in tree at current level after traversal.", display_name));
                 }
             }
         }
-        self.update_current_display_value(); 
+        self.update_current_display_value();
     }
 
     async fn run_fetch<T, Fut, OkF, ErrF>(&mut self, fut: Fut, on_ok: OkF, on_err: ErrF, err_msg: String)
@@ -1096,6 +1082,8 @@ impl App {
                 }
             }
             self.search_state.exit();
+            self.is_key_view_focused = true;
+            self.is_value_view_focused = false;
         } else {
             self.search_state.exit(); 
         }

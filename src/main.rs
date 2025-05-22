@@ -236,6 +236,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                     crate::app::app_clipboard::copy_selected_key_value_to_clipboard(&mut app).await;
                     did_async_op = true;
                 }
+                app::PendingOperation::ActivateSelectedFilteredKey => {
+                    app.activate_selected_filtered_key().await;
+                    did_async_op = true;
+                }
             }
         }
         if did_async_op {
@@ -303,7 +307,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                     app.exit_search_mode();
                                 }
                                 KeyCode::Enter => {
-                                    app.pending_operation = Some(app::PendingOperation::ActivateSelectedKey);
+                                    app.pending_operation = Some(app::PendingOperation::ActivateSelectedFilteredKey);
                                 }
                                 KeyCode::Down => {
                                     app.select_next_filtered_key();
@@ -364,7 +368,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                         }
                                     }
                                     KeyCode::Enter => {
-                                        if app.is_key_view_focused {
+                                        if app.search_state.is_active {
+                                            app.pending_operation = Some(app::PendingOperation::ActivateSelectedFilteredKey);
+                                        } else if app.is_key_view_focused {
                                             app.pending_operation = Some(app::PendingOperation::ActivateSelectedKey);
                                         } else if !app.is_value_view_focused && !app.is_key_view_focused {
                                             app.trigger_apply_selected_db();

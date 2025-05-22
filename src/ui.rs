@@ -139,61 +139,50 @@ fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(connection_status_paragraph, status_area);
 }
 
+fn format_ttl(ttl: i64) -> String {
+    if ttl < 0 {
+        "No Expiry".to_string()
+    } else {
+        let mins = ttl / 60;
+        let secs = ttl % 60;
+        if mins > 0 {
+            format!("Expires in {}m {}s", mins, secs)
+        } else {
+            format!("Expires in {}s", secs)
+        }
+    }
+}
+
 fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut key_view_base_title = format!("Keys: {}", app.current_breadcrumb.join(&app.key_delimiter.to_string()));
     if app.search_state.is_active {
-        // For global search, breadcrumb is less relevant in title, show search query
         key_view_base_title = format!("Search Results (Global): {}", app.search_state.query);
     }
-
     let key_view_title = if app.is_key_view_focused {
         format!("{} [FOCUSED]", key_view_base_title)
     } else {
         key_view_base_title
     };
-
     let key_items: Vec<ListItem> = if app.search_state.is_active {
         app.search_state.filtered_keys
             .iter()
-            .map(|full_key_name| {
-                let ttl = app.ttl_map.get(full_key_name).copied().unwrap_or(-2);
-                let ttype = app.type_map.get(full_key_name).cloned().unwrap_or_default();
-                let ttl_disp = if ttl < 0 { "∞".to_string() } else { ttl.to_string() };
-                ListItem::new(format!("{} [{} {}]", full_key_name, ttype, ttl_disp))
-            })
+            .map(|full_key_name| ListItem::new(full_key_name.as_str()))
             .collect()
     } else {
-        let delim = app.key_delimiter.to_string();
         app.visible_keys_in_current_view
             .iter()
-            .map(|(name, is_folder)| {
-                if *is_folder {
-                    ListItem::new(name.as_str())
-                } else {
-                    let mut parts = app.current_breadcrumb.clone();
-                    parts.push(name.clone());
-                    let full = parts.join(&delim);
-                    let ttl = app.ttl_map.get(&full).copied().unwrap_or(-2);
-                    let ttype = app.type_map.get(&full).cloned().unwrap_or_default();
-                    let ttl_disp = if ttl < 0 { "∞".to_string() } else { ttl.to_string() };
-                    ListItem::new(format!("{} [{} {}]", name, ttype, ttl_disp))
-                }
-            })
+            .map(|(name, _is_folder)| ListItem::new(name.as_str()))
             .collect()
     };
-
     let selected_key_index = if app.search_state.is_active {
         app.search_state.selected_index
     } else {
         app.selected_visible_key_index
     };
-
-    let mut list_state = ListState::default(); 
-    // Check emptiness and length before moving key_items
+    let mut list_state = ListState::default();
     let is_list_empty = key_items.is_empty();
     let list_len = key_items.len();
-
-    let list_widget = List::new(key_items) // key_items is moved here
+    let list_widget = List::new(key_items)
         .block(Block::default().borders(Borders::ALL).title(key_view_title))
         .highlight_style(
             Style::default()
@@ -202,33 +191,32 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(if app.is_key_view_focused { ">> " } else { "  " });
-
     if !is_list_empty && selected_key_index < list_len {
         list_state.select(Some(selected_key_index));
     }
-
     f.render_stateful_widget(list_widget, area, &mut list_state);
 }
 
 fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut value_block_title = match &app.active_leaf_key_name {
-        Some(name) => format!("Value: {} ({})", name, app.selected_key_type.as_deref().unwrap_or("N/A")),
+        Some(name) => {
+            let ttl = app.ttl_map.get(name).copied().unwrap_or(-2);
+            let ttl_str = format_ttl(ttl);
+            format!("Value: {} ({}) | TTL: {}", name, app.selected_key_type.as_deref().unwrap_or("N/A"), ttl_str)
+        },
         None => "Value".to_string(),
     };
     if app.is_value_view_focused {
         value_block_title.push_str(" [FOCUSED]");
     }
-
     let block = Block::default().borders(Borders::ALL).title(value_block_title)
         .border_style(if app.is_value_view_focused { Style::default().fg(Color::Cyan) } else { Style::default() });
-
     if let Some(lines) = &app.displayed_value_lines {
         let items: Vec<ListItem> = lines.iter().map(|s| ListItem::new(s.as_str())).collect();
         let mut list_state = ListState::default();
         if !items.is_empty() && app.selected_value_sub_index < items.len() {
             list_state.select(Some(app.selected_value_sub_index));
         }
-
         let list_widget = List::new(items)
             .block(block)
             .highlight_style(
@@ -238,19 +226,13 @@ fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol(if app.is_value_view_focused { ">> " } else { "  " });
-        
-        // The List widget itself doesn't directly use app.value_view_scroll in the same way Paragraph does.
-        // Ratatui's List state and drawing logic attempt to keep the selected item in view.
-        // If fine-grained manual scrolling of a non-selected list is ever needed, it's more complex.
-        // For now, relying on selection driving the view is standard.
         f.render_stateful_widget(list_widget, area, &mut list_state);
-
     } else {
         let value_display_text = app.current_display_value.as_deref().unwrap_or("");
         let value_paragraph = Paragraph::new(value_display_text)
             .block(block)
             .wrap(Wrap { trim: true })
-            .scroll(app.value_view_scroll); // Keep scroll for simple paragraph display
+            .scroll(app.value_view_scroll);
         f.render_widget(value_paragraph, area);
     }
 }
