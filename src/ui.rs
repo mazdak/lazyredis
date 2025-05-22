@@ -63,7 +63,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         if app.show_delete_confirmation_dialog {
             draw_delete_confirmation_dialog(f, app);
         }
-        if app.is_command_prompt_active {
+        if app.command_state.is_active {
             draw_command_prompt_modal(f, app);
         }
     }
@@ -139,21 +139,32 @@ fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(connection_status_paragraph, status_area);
 }
 
+fn format_ttl(ttl: i64) -> String {
+    if ttl < 0 {
+        "No Expiry".to_string()
+    } else {
+        let mins = ttl / 60;
+        let secs = ttl % 60;
+        if mins > 0 {
+            format!("Expires in {}m {}s", mins, secs)
+        } else {
+            format!("Expires in {}s", secs)
+        }
+    }
+}
+
 fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut key_view_base_title = format!("Keys: {}", app.current_breadcrumb.join(&app.key_delimiter.to_string()));
-    if app.is_search_active {
-        // For global search, breadcrumb is less relevant in title, show search query
-        key_view_base_title = format!("Search Results (Global): {}", app.search_query);
+    if app.search_state.is_active {
+        key_view_base_title = format!("Search Results (Global): {}", app.search_state.query);
     }
-
     let key_view_title = if app.is_key_view_focused {
         format!("{} [FOCUSED]", key_view_base_title)
     } else {
         key_view_base_title
     };
-
-    let key_items: Vec<ListItem> = if app.is_search_active {
-        app.filtered_keys_in_current_view
+    let key_items: Vec<ListItem> = if app.search_state.is_active {
+        app.search_state.filtered_keys
             .iter()
             .map(|full_key_name| ListItem::new(full_key_name.as_str()))
             .collect()
@@ -163,19 +174,15 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
             .map(|(name, _is_folder)| ListItem::new(name.as_str()))
             .collect()
     };
-
-    let selected_key_index = if app.is_search_active {
-        app.selected_filtered_key_index
+    let selected_key_index = if app.search_state.is_active {
+        app.search_state.selected_index
     } else {
         app.selected_visible_key_index
     };
-
-    let mut list_state = ListState::default(); 
-    // Check emptiness and length before moving key_items
+    let mut list_state = ListState::default();
     let is_list_empty = key_items.is_empty();
     let list_len = key_items.len();
-
-    let list_widget = List::new(key_items) // key_items is moved here
+    let list_widget = List::new(key_items)
         .block(Block::default().borders(Borders::ALL).title(key_view_title))
         .highlight_style(
             Style::default()
@@ -184,33 +191,32 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(if app.is_key_view_focused { ">> " } else { "  " });
-
     if !is_list_empty && selected_key_index < list_len {
         list_state.select(Some(selected_key_index));
     }
-
     f.render_stateful_widget(list_widget, area, &mut list_state);
 }
 
 fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut value_block_title = match &app.active_leaf_key_name {
-        Some(name) => format!("Value: {} ({})", name, app.selected_key_type.as_deref().unwrap_or("N/A")),
+        Some(name) => {
+            let ttl = app.ttl_map.get(name).copied().unwrap_or(-2);
+            let ttl_str = format_ttl(ttl);
+            format!("Value: {} ({}) | TTL: {}", name, app.selected_key_type.as_deref().unwrap_or("N/A"), ttl_str)
+        },
         None => "Value".to_string(),
     };
     if app.is_value_view_focused {
         value_block_title.push_str(" [FOCUSED]");
     }
-
     let block = Block::default().borders(Borders::ALL).title(value_block_title)
         .border_style(if app.is_value_view_focused { Style::default().fg(Color::Cyan) } else { Style::default() });
-
     if let Some(lines) = &app.displayed_value_lines {
         let items: Vec<ListItem> = lines.iter().map(|s| ListItem::new(s.as_str())).collect();
         let mut list_state = ListState::default();
         if !items.is_empty() && app.selected_value_sub_index < items.len() {
             list_state.select(Some(app.selected_value_sub_index));
         }
-
         let list_widget = List::new(items)
             .block(block)
             .highlight_style(
@@ -220,19 +226,13 @@ fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol(if app.is_value_view_focused { ">> " } else { "  " });
-        
-        // The List widget itself doesn't directly use app.value_view_scroll in the same way Paragraph does.
-        // Ratatui's List state and drawing logic attempt to keep the selected item in view.
-        // If fine-grained manual scrolling of a non-selected list is ever needed, it's more complex.
-        // For now, relying on selection driving the view is standard.
         f.render_stateful_widget(list_widget, area, &mut list_state);
-
     } else {
         let value_display_text = app.current_display_value.as_deref().unwrap_or("");
         let value_paragraph = Paragraph::new(value_display_text)
             .block(block)
             .wrap(Wrap { trim: true })
-            .scroll(app.value_view_scroll); // Keep scroll for simple paragraph display
+            .scroll(app.value_view_scroll);
         f.render_widget(value_paragraph, area);
     }
 }
@@ -243,9 +243,9 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" | "),
         Span::styled("p: profiles", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
-        Span::styled("j/k/↑/↓: nav keys/vals", Style::default().fg(Color::Yellow)), // Updated nav help
+        Span::styled("j/k/↑/↓: nav keys/vals", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
-        Span::styled("PgUp/PgDn: page nav vals", Style::default().fg(Color::Yellow)), // Added page nav for values
+        Span::styled("PgUp/PgDn: page nav vals", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
         Span::styled("Tab/S-Tab: focus", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
@@ -259,10 +259,10 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" | "),
         Span::styled("/: search", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
-        Span::styled("d: del", Style::default().fg(Color::Yellow)), // Added delete help
+        Span::styled("d: del", Style::default().fg(Color::Yellow)),
     ];
 
-    if app.is_search_active {
+    if app.search_state.is_active {
         help_spans.extend(vec![
             Span::raw(" | "),
             Span::styled("Esc: exit search", Style::default().fg(Color::Cyan)),
@@ -276,7 +276,7 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" / "),
             Span::styled("[N]o (Esc)", Style::default().fg(Color::Red)),
         ];
-    } else if !app.is_command_prompt_active {
+    } else if !app.command_state.is_active {
         help_spans.extend(vec![
             Span::raw(" | "),
             Span::styled(":: cmd", Style::default().fg(Color::Cyan)),
@@ -379,16 +379,16 @@ fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
     let area = centered_rect(70, 30, f.area());
     f.render_widget(Clear, area);
 
-    let input_line_text = format!("CMD> {}", app.command_input);
+    let input_line_text = format!("CMD> {}", app.command_state.input_buffer);
     // Calculate cursor position: area.x + "CMD> ".len() + current command_input length
     // Ensure cursor position is within the bounds of the modal.
-    let cursor_x = area.x + 6 + app.command_input.chars().count() as u16;
+    let cursor_x = area.x + 6 + app.command_state.input_buffer.chars().count() as u16;
     let cursor_y = area.y + 3; // Corrected: Was area.y + 4, should be on the input line
 
     // Only set cursor if the command prompt is active and focused (implicitly handled by modal display)
     f.set_cursor_position(Position::new(cursor_x, cursor_y));
 
-    let output = app.command_output.as_deref().unwrap_or("");
+    let output = app.command_state.last_result.as_deref().unwrap_or("");
 
     let text = vec![
         Line::from(Span::styled(
