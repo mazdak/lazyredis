@@ -13,10 +13,10 @@ impl App {
         match fut.await {
             Ok(val) => {
                 on_ok(self, val);
-                self.selected_key_value = None;
+                self.value_viewer.selected_key_value = None;
             }
             Err(e) => {
-                self.selected_key_value = Some(format!("{}: {}", err_msg, e));
+                self.value_viewer.selected_key_value = Some(format!("{}: {}", err_msg, e));
                 on_err(self);
             }
         }
@@ -31,26 +31,26 @@ impl App {
             fut,
             |app, pairs| {
                 if pairs.is_empty() {
-                    app.selected_key_value_hash = Some(Vec::new());
+                    app.value_viewer.selected_key_value_hash = Some(Vec::new());
                 } else {
                     let mut hash_data: Vec<(String, String)> = Vec::new();
                     for chunk in pairs.chunks(2) {
                         if chunk.len() == 2 {
                             hash_data.push((chunk[0].clone(), chunk[1].clone()));
                         } else {
-                            app.selected_key_value = Some(format!(
+                            app.value_viewer.selected_key_value = Some(format!(
                                 "HGETALL for '{}' (hash) returned malformed pair data.",
                                 key_name
                             ));
-                            app.selected_key_value_hash = None;
+                            app.value_viewer.selected_key_value_hash = None;
                             return;
                         }
                     }
-                    app.selected_key_value_hash = Some(hash_data);
+                    app.value_viewer.selected_key_value_hash = Some(hash_data);
                 }
             },
             |app| {
-                app.selected_key_value_hash = None;
+                app.value_viewer.selected_key_value_hash = None;
             },
             err_context,
         )
@@ -69,7 +69,7 @@ impl App {
             fut,
             |app, pairs| {
                 if pairs.is_empty() {
-                    app.selected_key_value_zset = Some(Vec::new());
+                    app.value_viewer.selected_key_value_zset = Some(Vec::new());
                 } else {
                     let mut zset_data: Vec<(String, f64)> = Vec::new();
                     for chunk in pairs.chunks(2) {
@@ -78,29 +78,29 @@ impl App {
                             match chunk[1].parse::<f64>() {
                                 Ok(score) => zset_data.push((member, score)),
                                 Err(_) => {
-                                    app.selected_key_value = Some(format!(
+                                    app.value_viewer.selected_key_value = Some(format!(
                                         "ZRANGE for '{}' (zset) failed to parse score for member '{}'.",
                                         key_name,
                                         member
                                     ));
-                                    app.selected_key_value_zset = None;
+                                    app.value_viewer.selected_key_value_zset = None;
                                     return;
                                 }
                             }
                         } else {
-                            app.selected_key_value = Some(format!(
+                            app.value_viewer.selected_key_value = Some(format!(
                                 "ZRANGE for '{}' (zset) returned malformed pair data.",
                                 key_name
                             ));
-                            app.selected_key_value_zset = None;
+                            app.value_viewer.selected_key_value_zset = None;
                             return;
                         }
                     }
-                    app.selected_key_value_zset = Some(zset_data);
+                    app.value_viewer.selected_key_value_zset = Some(zset_data);
                 }
             },
             |app| {
-                app.selected_key_value_zset = None;
+                app.value_viewer.selected_key_value_zset = None;
             },
             err_context,
         )
@@ -117,10 +117,10 @@ impl App {
         self.run_fetch(
             fut,
             |app, elements| {
-                app.selected_key_value_list = Some(elements);
+                app.value_viewer.selected_key_value_list = Some(elements);
             },
             |app| {
-                app.selected_key_value_list = None;
+                app.value_viewer.selected_key_value_list = None;
             },
             err_context,
         )
@@ -135,10 +135,10 @@ impl App {
         self.run_fetch(
             fut,
             |app, members| {
-                app.selected_key_value_set = Some(members);
+                app.value_viewer.selected_key_value_set = Some(members);
             },
             |app| {
-                app.selected_key_value_set = None;
+                app.value_viewer.selected_key_value_set = None;
             },
             err_context,
         )
@@ -160,10 +160,10 @@ impl App {
             .query_async::<Value>(con).await
         {
             Ok(Value::Nil) => {
-                self.selected_key_value_stream = Some(Vec::new());
-                self.selected_key_value = None;
-                self.current_display_value = Some("(empty stream or no new messages)".to_string());
-                self.displayed_value_lines = None;
+                self.value_viewer.selected_key_value_stream = Some(Vec::new());
+                self.value_viewer.selected_key_value = None;
+                self.value_viewer.current_display_value = Some("(empty stream or no new messages)".to_string());
+                self.value_viewer.displayed_value_lines = None;
             },
             Ok(Value::Array(stream_data)) => { 
                 let mut parsed_streams: Vec<StreamEntry> = Vec::new();
@@ -198,19 +198,19 @@ impl App {
                         }
                     }
                 }
-                self.selected_key_value_stream = Some(parsed_streams);
-                self.selected_key_value = None;
-                self.update_current_display_value(); 
+                self.value_viewer.selected_key_value_stream = Some(parsed_streams);
+                self.value_viewer.selected_key_value = None;
+                self.value_viewer.update_current_display_value();
             },
             Ok(other_value) => {
-                self.selected_key_value_stream = None;
-                self.selected_key_value = Some(format!("Unexpected value structure from XREADGROUP: {:?}", other_value));
-                self.update_current_display_value();
+                self.value_viewer.selected_key_value_stream = None;
+                self.value_viewer.selected_key_value = Some(format!("Unexpected value structure from XREADGROUP: {:?}", other_value));
+                self.value_viewer.update_current_display_value();
             },
             Err(e) => {
-                self.selected_key_value_stream = None;
-                self.selected_key_value = Some(format!("Error fetching stream: {}", e));
-                self.update_current_display_value();
+                self.value_viewer.selected_key_value_stream = None;
+                self.value_viewer.selected_key_value = Some(format!("Error fetching stream: {}", e));
+                self.value_viewer.update_current_display_value();
             }
         }
     }

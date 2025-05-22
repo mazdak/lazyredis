@@ -56,6 +56,7 @@ impl RedisClient {
         &mut self,
         profile: &ConnectionProfile,
         use_profile_db: bool,
+        target_db_index_override: Option<usize>,
     ) -> Result<(), RedisError> {
         self.connection_status = format!("Connecting to {} ({})...", profile.name, profile.url);
         let client = Client::open(profile.url.as_str())?;
@@ -69,7 +70,7 @@ impl RedisClient {
         let db_to_select = if use_profile_db {
             profile.db.unwrap_or(self.db_index as u8)
         } else {
-            self.db_index as u8
+            target_db_index_override.unwrap_or(self.db_index) as u8
         };
         redis::cmd("SELECT")
             .arg(db_to_select)

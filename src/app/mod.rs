@@ -1,6 +1,9 @@
 pub mod app_clipboard;
 mod app_fetch;
 pub mod redis_client;
+pub mod value_viewer;
+pub mod state_profile_selector;
+pub mod state_delete_dialog;
 
 // use crate::search::SearchState;
 
@@ -14,7 +17,10 @@ pub use redis::aio::MultiplexedConnection; // Re-export for other modules
 // use tokio::task; // Moved to app_clipboard.rs, check if needed elsewhere here.
 use std::collections::HashMap;
 // use crossclip::{Clipboard, SystemClipboard}; // Moved to app_clipboard.rs
-use crate::app::redis_client::{RedisClient};
+use crate::app::redis_client::RedisClient;
+use crate::app::value_viewer::ValueViewer;
+use crate::app::state_profile_selector::ProfileSelectorState;
+use crate::app::state_delete_dialog::DeleteDialogState;
 // REMOVE: use crate::app::app_fetch::{
 //     fetch_and_set_hash_value,
 //     fetch_and_set_zset_value,
@@ -57,8 +63,7 @@ pub struct App {
     pub connection_status: String,
     pub profiles: Vec<ConnectionProfile>,
     pub current_profile_index: usize,
-    pub is_profile_selector_active: bool,
-    pub selected_profile_list_index: usize,
+    pub profile_state: ProfileSelectorState,
     pub raw_keys: Vec<String>,
     pub key_tree: HashMap<String, KeyTreeNode>,
     pub current_breadcrumb: Vec<String>,
@@ -67,31 +72,18 @@ pub struct App {
     pub type_map: HashMap<String, String>,
     pub selected_visible_key_index: usize,
     pub key_delimiter: char,
-    pub is_key_view_focused: bool, 
-    pub active_leaf_key_name: Option<String>, 
-    pub selected_key_type: Option<String>,    
-    pub selected_key_value: Option<String>,   
-    pub selected_key_value_hash: Option<Vec<(String, String)>>,
-    pub selected_key_value_zset: Option<Vec<(String, f64)>>, 
-    pub selected_key_value_list: Option<Vec<String>>,
-    pub selected_key_value_set: Option<Vec<String>>,
-    pub selected_key_value_stream: Option<Vec<StreamEntry>>,
-    pub is_value_view_focused: bool, 
-    pub value_view_scroll: (u16, u16),    
-    pub clipboard_status: Option<String>, 
-    pub current_display_value: Option<String>, 
-    pub displayed_value_lines: Option<Vec<String>>, 
-    pub selected_value_sub_index: usize, 
+    pub is_key_view_focused: bool,
+    pub value_viewer: ValueViewer,
+    pub is_value_view_focused: bool,
+    pub scan_cursor: u64,
+    pub keys_fully_loaded: bool,
+    pub clipboard_status: Option<String>,
 
     // Fuzzy Search State
     pub search_state: SearchState,
 
     // Delete Confirmation State
-    pub show_delete_confirmation_dialog: bool,
-    pub key_to_delete_display_name: Option<String>,
-    pub key_to_delete_full_path: Option<String>, 
-    pub prefix_to_delete: Option<String>,      
-    pub deletion_is_folder: bool,
+    pub delete_dialog: DeleteDialogState,
 
     // Command prompt state
     pub command_state: CommandState,
@@ -111,8 +103,7 @@ impl App {
             connection_status: format!("Initializing for {} ({})...", initial_profile_name, initial_url),
             profiles,
             current_profile_index: 0, 
-            is_profile_selector_active: false,
-            selected_profile_list_index: 0,
+            profile_state: ProfileSelectorState::default(),
             
             raw_keys: Vec::new(),
             key_tree: HashMap::new(),
@@ -123,30 +114,17 @@ impl App {
             selected_visible_key_index: 0,
             key_delimiter: ':',
             is_key_view_focused: false, 
-            active_leaf_key_name: None, 
-            selected_key_type: None,    
-            selected_key_value: None,   
-            selected_key_value_hash: None,
-            selected_key_value_zset: None, 
-            selected_key_value_list: None,
-            selected_key_value_set: None,
-            selected_key_value_stream: None,
-            is_value_view_focused: false, 
-            value_view_scroll: (0, 0),    
-            clipboard_status: None, 
-            current_display_value: None, 
-            displayed_value_lines: None,
-            selected_value_sub_index: 0,
+            value_viewer: ValueViewer::default(),
+            is_value_view_focused: false,
+            scan_cursor: 0,
+            keys_fully_loaded: false,
+            clipboard_status: None,
 
             // Fuzzy Search State
             search_state: SearchState::new(),
 
             // Delete Confirmation State
-            show_delete_confirmation_dialog: false,
-            key_to_delete_display_name: None,
-            key_to_delete_full_path: None,
-            prefix_to_delete: None,
-            deletion_is_folder: false,
+            delete_dialog: DeleteDialogState::default(),
 
             // Command prompt state
             command_state: CommandState::new(),
@@ -154,8 +132,12 @@ impl App {
         };
 
         if !app.profiles.is_empty() {
-            app.current_profile_index = app.profiles.iter().position(|p| p.url == initial_url).unwrap_or(0);
-            app.selected_profile_list_index = app.current_profile_index;
+            app.current_profile_index = app
+                .profiles
+                .iter()
+                .position(|p| p.url == initial_url)
+                .unwrap_or(0);
+            app.profile_state.selected_index = app.current_profile_index;
             if let Some(db) = app.profiles[app.current_profile_index].db {
                 app.selected_db_index = db as usize;
             }
@@ -183,8 +165,15 @@ impl App {
         self.connection_status = format!("Connecting to {} ({})...", profile.name, profile.url);
         tokio::task::yield_now().await;
 
+        // Determine the target_db_index_override based on use_profile_db
+        let target_db_override = if use_profile_db {
+            None // When using profile_db, no override is needed
+        } else {
+            Some(self.selected_db_index) // When not using profile_db (i.e. manual DB select), pass current app selection
+        };
+
         // Use the new RedisClient abstraction
-        match self.redis.connect_to_profile(profile, use_profile_db).await {
+        match self.redis.connect_to_profile(profile, use_profile_db, target_db_override).await {
             Ok(()) => {
                 self.selected_db_index = self.redis.db_index;
                 self.connection_status = self.redis.connection_status.clone();
@@ -197,19 +186,8 @@ impl App {
     }
 
     pub fn clear_selected_key_info(&mut self) {
-        self.active_leaf_key_name = None;
-        self.selected_key_type = None;
-        self.selected_key_value = None;
-        self.selected_key_value_hash = None;
-        self.selected_key_value_zset = None;
-        self.selected_key_value_list = None;
-        self.selected_key_value_set = None;
-        self.selected_key_value_stream = None;
-        self.value_view_scroll = (0, 0);
+        self.value_viewer.clear();
         self.is_value_view_focused = false;
-        self.current_display_value = None;
-        self.displayed_value_lines = None;
-        self.selected_value_sub_index = 0;
     }
 
     async fn fetch_keys_and_build_tree(&mut self) {
@@ -220,7 +198,10 @@ impl App {
         self.selected_visible_key_index = 0;
         self.clear_selected_key_info();
 
-        let mut cursor: u64 = 0;
+        self.scan_cursor = 0;
+        self.keys_fully_loaded = false;
+
+        let mut cursor: u64 = self.scan_cursor;
         let mut con = match self.redis.connection.take() {
             Some(con) => con,
             None => {
@@ -248,9 +229,12 @@ impl App {
                         self.raw_keys.len(),
                         cursor
                     );
+                    self.scan_cursor = cursor;
                     if cursor == 0 {
+                        self.keys_fully_loaded = true;
                         break;
                     }
+                    tokio::task::yield_now().await;
                 }
                 Err(e) => {
                     self.connection_status = format!("Failed during SCAN: {}", e);
@@ -261,6 +245,12 @@ impl App {
         self.redis.connection = Some(con);
         if self.raw_keys.is_empty() {
             self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
+        } else if !self.keys_fully_loaded {
+            self.connection_status = format!(
+                "Connected to DB {}. Loaded {} keys so far...",
+                self.selected_db_index,
+                self.raw_keys.len()
+            );
         } else {
             self.connection_status = format!(
                 "Connected to DB {}. Found {} keys. Displaying {} top-level items.",
@@ -331,8 +321,8 @@ impl App {
                     if let Some(KeyTreeNode::Folder(sub_map)) = current_node_map_for_leaf.get(segment) {
                         current_node_map_for_leaf = sub_map;
                     } else {
-                        self.selected_key_value = Some("Error: Invalid breadcrumb path while finding leaf.".to_string());
-                        self.update_current_display_value();
+                        self.value_viewer.selected_key_value = Some("Error: Invalid breadcrumb path while finding leaf.".to_string());
+                        self.value_viewer.update_current_display_value();
                         return;
                     }
                 }
@@ -343,16 +333,16 @@ impl App {
                         _ => None,
                     });
                 if let Some(actual_full_key_name) = actual_full_key_name_opt {
-                    self.active_leaf_key_name = Some(actual_full_key_name.clone());
-                    self.selected_key_type = Some("fetching...".to_string());
-                    self.selected_value_sub_index = 0;
-                    self.value_view_scroll = (0, 0);
+                    self.value_viewer.active_leaf_key_name = Some(actual_full_key_name.clone());
+                    self.value_viewer.selected_key_type = Some("fetching...".to_string());
+                    self.value_viewer.selected_value_sub_index = 0;
+                    self.value_viewer.value_view_scroll = (0, 0);
                     let mut con = match self.redis.connection.take() {
                         Some(con) => con,
                         None => {
-                            self.selected_key_type = Some("error".to_string());
-                            self.selected_key_value = Some("Error: No Redis connection to fetch key value.".to_string());
-                            self.update_current_display_value();
+                            self.value_viewer.selected_key_type = Some("error".to_string());
+                            self.value_viewer.selected_key_value = Some("Error: No Redis connection to fetch key value.".to_string());
+                            self.value_viewer.update_current_display_value();
                             return;
                         }
                     };
@@ -363,12 +353,12 @@ impl App {
                     self.type_map.insert(actual_full_key_name.clone(), key_type.clone());
                     match redis::cmd("GET").arg(&actual_full_key_name).query_async::<Option<String>>(&mut con).await {
                         Ok(Some(value)) => {
-                            self.selected_key_type = Some("string".to_string());
-                            self.selected_key_value = Some(value);
+                            self.value_viewer.selected_key_type = Some("string".to_string());
+                            self.value_viewer.selected_key_value = Some(value);
                         }
                         Ok(None) => {
-                            self.selected_key_type = Some("string".to_string());
-                            self.selected_key_value = Some("(nil)".to_string());
+                            self.value_viewer.selected_key_type = Some("string".to_string());
+                            self.value_viewer.selected_key_value = Some("(nil)".to_string());
                         }
                         Err(e_get) => {
                             let mut is_wrong_type_error = false;
@@ -384,7 +374,7 @@ impl App {
                             if is_wrong_type_error {
                                 match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await {
                                     Ok(key_type) => {
-                                        self.selected_key_type = Some(key_type.clone());
+                                        self.value_viewer.selected_key_type = Some(key_type.clone());
                                         match key_type.as_str() {
                                             "hash" => self.fetch_and_set_hash_value(&actual_full_key_name, &mut con).await,
                                             "zset" => self.fetch_and_set_zset_value(&actual_full_key_name, &mut con).await,
@@ -392,7 +382,7 @@ impl App {
                                             "set" => self.fetch_and_set_set_value(&actual_full_key_name, &mut con).await,
                                             "stream" => self.fetch_and_set_stream_value(&actual_full_key_name, &mut con).await,
                                             _ => {
-                                                self.selected_key_value = Some(format!(
+                                                self.value_viewer.selected_key_value = Some(format!(
                                                     "Key is of type '{}'. Value view for this type not yet implemented.",
                                                     key_type
                                                 ));
@@ -400,16 +390,16 @@ impl App {
                                         }
                                     }
                                     Err(e_type) => {
-                                        self.selected_key_type = Some("error (TYPE failed)".to_string());
-                                        self.selected_key_value = Some(format!(
+                                        self.value_viewer.selected_key_type = Some("error (TYPE failed)".to_string());
+                                        self.value_viewer.selected_key_value = Some(format!(
                                             "GET for '{}' failed (WRONGTYPE). Subsequent TYPE command also failed: {}",
                                             actual_full_key_name, e_type
                                         ));
                                     }
                                 }
                             } else {
-                                self.selected_key_type = Some("error (GET failed)".to_string());
-                                self.selected_key_value = Some(format!(
+                                self.value_viewer.selected_key_type = Some("error (GET failed)".to_string());
+                                self.value_viewer.selected_key_value = Some(format!(
                                     "Failed to GET key '{}': {} (Kind: {:?}, Code: {:?})",
                                     actual_full_key_name, e_get, e_get.kind(), e_get.code()
                                 ));
@@ -418,111 +408,12 @@ impl App {
                     }
                     self.redis.connection = Some(con);
                 } else {
-                    self.selected_key_type = Some("error".to_string());
-                    self.selected_key_value = Some(format!("Error: Key '{}' not found as leaf in tree at current level after traversal.", display_name));
+                    self.value_viewer.selected_key_type = Some("error".to_string());
+                    self.value_viewer.selected_key_value = Some(format!("Error: Key '{}' not found as leaf in tree at current level after traversal.", display_name));
                 }
             }
         }
-        self.update_current_display_value();
-    }
-
-    fn update_current_display_value(&mut self) {
-        self.current_display_value = None; 
-        self.displayed_value_lines = None; 
-        self.selected_value_sub_index = 0; 
-        self.value_view_scroll = (0,0); 
-
-        if self.selected_key_type.as_deref() == Some("hash") {
-            if let Some(hash_data) = &self.selected_key_value_hash {
-                if hash_data.is_empty() {
-                    self.current_display_value = Some("(empty hash)".to_string());
-                } else {
-                    self.displayed_value_lines = Some(
-                        hash_data
-                            .iter()
-                            .map(|(k, v)| format!("{}: {}", k, v))
-                            .collect::<Vec<String>>(),
-                    );
-                }
-            } else {
-                self.current_display_value = self.selected_key_value.clone(); 
-            }
-        } else if self.selected_key_type.as_deref() == Some("zset") {
-            if let Some(zset_data) = &self.selected_key_value_zset {
-                if zset_data.is_empty() {
-                    self.current_display_value = Some("(empty zset)".to_string());
-                } else {
-                    self.displayed_value_lines = Some(
-                        zset_data
-                            .iter()
-                            .map(|(member, score)| format!("Score: {} - Member: {}", score, member))
-                            .collect::<Vec<String>>(),
-                    );
-                }
-            } else {
-                self.current_display_value = self.selected_key_value.clone(); 
-            }
-        } else if self.selected_key_type.as_deref() == Some("list") { 
-            if let Some(list_data) = &self.selected_key_value_list {
-                if list_data.is_empty() {
-                    self.current_display_value = Some("(empty list)".to_string());
-                } else {
-                    self.displayed_value_lines = Some(
-                        list_data
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, val)| format!("{}: {}", idx, val))
-                            .collect::<Vec<String>>(),
-                    );
-                }
-            } else {
-                self.current_display_value = self.selected_key_value.clone(); 
-            }
-        } else if self.selected_key_type.as_deref() == Some("set") { 
-            if let Some(set_data) = &self.selected_key_value_set {
-                if set_data.is_empty() {
-                    self.current_display_value = Some("(empty set)".to_string());
-                } else {
-                    let mut sorted_set_data = set_data.clone();
-                    sorted_set_data.sort_unstable(); 
-                    self.displayed_value_lines = Some(
-                        sorted_set_data
-                            .iter()
-                            .map(|val| format!("- {}", val))
-                            .collect::<Vec<String>>(),
-                    );
-                }
-            } else {
-                self.current_display_value = self.selected_key_value.clone(); 
-            }
-        } else if self.selected_key_type.as_deref() == Some("stream") { 
-            if let Some(stream_entries) = &self.selected_key_value_stream {
-                if stream_entries.is_empty() {
-                    self.current_display_value = Some("(empty stream or an error occurred fetching entries)".to_string());
-                } else {
-                    let mut lines: Vec<String> = Vec::new();
-                    for entry in stream_entries {
-                        lines.push(format!("ID: {}", entry.id));
-                        if entry.fields.is_empty(){
-                            lines.push("  (no fields)".to_string());
-                        } else {
-                            for (field, value) in &entry.fields {
-                                lines.push(format!("  {}: {}", field, value));
-                            }
-                        }
-                        lines.push("---".to_string()); 
-                    }
-                    if lines.last().map_or(false, |l| l == "---") { 
-                        lines.pop();
-                    }
-                    self.displayed_value_lines = Some(lines);
-                }
-            } else {
-                self.current_display_value = self.selected_key_value.clone();
-            }
-        } else {
-            self.current_display_value = self.selected_key_value.clone();
-        }
+        self.value_viewer.update_current_display_value();
     }
 
     pub fn navigate_key_tree_up(&mut self) {
@@ -567,32 +458,21 @@ impl App {
     }
 
     pub fn toggle_profile_selector(&mut self) {
-        self.is_profile_selector_active = !self.is_profile_selector_active;
-        if self.is_profile_selector_active {
-            self.selected_profile_list_index = self.current_profile_index;
-        }
+        self.profile_state.toggle(self.current_profile_index);
     }
 
     pub fn next_profile_in_list(&mut self) {
-        if !self.profiles.is_empty() {
-            self.selected_profile_list_index = (self.selected_profile_list_index + 1) % self.profiles.len();
-        }
+        self.profile_state.next(self.profiles.len());
     }
 
     pub fn previous_profile_in_list(&mut self) {
-        if !self.profiles.is_empty() {
-            if self.selected_profile_list_index > 0 {
-                self.selected_profile_list_index -= 1;
-            } else {
-                self.selected_profile_list_index = self.profiles.len() - 1;
-            }
-        }
+        self.profile_state.previous(self.profiles.len());
     }
 
     pub async fn select_profile_and_connect(&mut self) {
-        if self.selected_profile_list_index < self.profiles.len() {
-            self.current_profile_index = self.selected_profile_list_index;
-            self.is_profile_selector_active = false; 
+        if self.profile_state.selected_index < self.profiles.len() {
+            self.current_profile_index = self.profile_state.selected_index;
+            self.profile_state.is_active = false;
             self.connect_to_profile(self.current_profile_index, true).await;
         }
     }
@@ -600,11 +480,13 @@ impl App {
     pub fn cycle_focus_backward(&mut self) {
         if self.is_value_view_focused {
             self.is_value_view_focused = false;
-            self.is_key_view_focused = true;
+            self.is_key_view_focused = false; // DB selector focus
         } else if self.is_key_view_focused {
             self.is_key_view_focused = false;
+            self.is_value_view_focused = true;
         } else { 
-            self.is_value_view_focused = true; 
+            self.is_key_view_focused = true; 
+            self.is_value_view_focused = false;
         }
     }
 
@@ -614,6 +496,7 @@ impl App {
             self.is_value_view_focused = true;
         } else if self.is_value_view_focused {
             self.is_value_view_focused = false;
+            // Now, neither is focused: DB selector focus
         } else { 
             self.is_key_view_focused = true;
         }
@@ -668,45 +551,32 @@ impl App {
     }
 
     pub fn initiate_delete_selected_item(&mut self) {
-        if self.search_state.is_active || self.selected_visible_key_index >= self.visible_keys_in_current_view.len() {
-            return;
-        }
-
-        let (display_name, is_folder) = self.visible_keys_in_current_view[self.selected_visible_key_index].clone();
-        self.key_to_delete_display_name = Some(display_name.clone());
-        self.deletion_is_folder = is_folder;
-
-        if is_folder {
-            let mut prefix_parts = self.current_breadcrumb.clone();
-            prefix_parts.push(display_name.trim_end_matches(self.key_delimiter).to_string()); 
-            self.prefix_to_delete = Some(format!("{}{}", prefix_parts.join(&self.key_delimiter.to_string()), self.key_delimiter));
-            self.key_to_delete_full_path = None;
-        } else {
-            let mut full_key_parts = self.current_breadcrumb.clone();
-            full_key_parts.push(display_name);
-            self.key_to_delete_full_path = Some(full_key_parts.join(&self.key_delimiter.to_string()));
-            self.prefix_to_delete = None;
-        }
-        self.show_delete_confirmation_dialog = true;
+        self.delete_dialog.initiate_delete_selected_item(
+            self.selected_visible_key_index,
+            &self.visible_keys_in_current_view,
+            &self.current_breadcrumb,
+            self.key_delimiter,
+            self.search_state.is_active,
+        );
     }
 
     pub fn cancel_delete_item(&mut self) {
-        self.show_delete_confirmation_dialog = false;
-        self.key_to_delete_display_name = None;
-        self.key_to_delete_full_path = None;
-        self.prefix_to_delete = None;
-        self.deletion_is_folder = false;
+        self.delete_dialog.show_confirmation_dialog = false;
+        self.delete_dialog.key_to_delete_display_name = None;
+        self.delete_dialog.key_to_delete_full_path = None;
+        self.delete_dialog.prefix_to_delete = None;
+        self.delete_dialog.deletion_is_folder = false;
     }
 
     pub async fn confirm_delete_item(&mut self) {
-        let result = if self.deletion_is_folder {
-            if let Some(prefix) = self.prefix_to_delete.clone() {
+        let result = if self.delete_dialog.deletion_is_folder {
+            if let Some(prefix) = self.delete_dialog.prefix_to_delete.clone() {
                 self.delete_redis_prefix_async(&prefix).await
             } else {
                 Err("Prefix to delete was None".to_string())
             }
         } else {
-            if let Some(key_path) = self.key_to_delete_full_path.clone() {
+            if let Some(key_path) = self.delete_dialog.key_to_delete_full_path.clone() {
                 self.delete_redis_key_async(&key_path).await
             } else {
                 Err("Key path to delete was None".to_string())
@@ -718,15 +588,15 @@ impl App {
             Err(e) => self.clipboard_status = Some(format!("Error deleting: {}", e)),
         }
         
-        self.show_delete_confirmation_dialog = false;
-        self.key_to_delete_display_name = None;
-        self.key_to_delete_full_path = None;
-        self.prefix_to_delete = None;
-        self.deletion_is_folder = false;
+        self.delete_dialog.show_confirmation_dialog = false;
+        self.delete_dialog.key_to_delete_display_name = None;
+        self.delete_dialog.key_to_delete_full_path = None;
+        self.delete_dialog.prefix_to_delete = None;
+        self.delete_dialog.deletion_is_folder = false;
 
         self.fetch_keys_and_build_tree().await;
         self.update_visible_keys(); 
-        self.active_leaf_key_name = None; 
+        self.value_viewer.active_leaf_key_name = None;
         self.clear_selected_key_info(); 
     }
 
@@ -844,37 +714,37 @@ impl App {
     }
 
     pub fn select_next_value_item(&mut self) {
-        if let Some(lines) = &self.displayed_value_lines {
+        if let Some(lines) = &self.value_viewer.displayed_value_lines {
             if !lines.is_empty() {
-                self.selected_value_sub_index = (self.selected_value_sub_index + 1) % lines.len();
+                self.value_viewer.selected_value_sub_index = (self.value_viewer.selected_value_sub_index + 1) % lines.len();
             }
         }
     }
 
     pub fn select_previous_value_item(&mut self) {
-        if let Some(lines) = &self.displayed_value_lines {
+        if let Some(lines) = &self.value_viewer.displayed_value_lines {
             if !lines.is_empty() {
-                if self.selected_value_sub_index > 0 {
-                    self.selected_value_sub_index -= 1;
+                if self.value_viewer.selected_value_sub_index > 0 {
+                    self.value_viewer.selected_value_sub_index -= 1;
                 } else {
-                    self.selected_value_sub_index = lines.len() - 1;
+                    self.value_viewer.selected_value_sub_index = lines.len() - 1;
                 }
             }
         }
     }
 
     pub fn select_page_down_value_item(&mut self, page_size: usize) {
-        if let Some(lines) = &self.displayed_value_lines {
+        if let Some(lines) = &self.value_viewer.displayed_value_lines {
             if !lines.is_empty() {
-                self.selected_value_sub_index = (self.selected_value_sub_index + page_size).min(lines.len() - 1);
+                self.value_viewer.selected_value_sub_index = (self.value_viewer.selected_value_sub_index + page_size).min(lines.len() - 1);
             }
         }
     }
 
     pub fn select_page_up_value_item(&mut self, page_size: usize) {
-        if let Some(lines) = &self.displayed_value_lines {
+        if let Some(lines) = &self.value_viewer.displayed_value_lines {
             if !lines.is_empty() {
-                self.selected_value_sub_index = self.selected_value_sub_index.saturating_sub(page_size);
+                self.value_viewer.selected_value_sub_index = self.value_viewer.selected_value_sub_index.saturating_sub(page_size);
             }
         }
     }

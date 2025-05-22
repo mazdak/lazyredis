@@ -40,7 +40,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         ].as_ref())
         .split(f.area());
 
-    if app.is_profile_selector_active {
+    if app.profile_state.is_active {
         // Profile selector takes over the main view
         draw_profile_selector_modal(f, app);
         // Still draw footer and status if they are separate from the main content area that modal covers
@@ -60,7 +60,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         draw_footer_help(f, app, main_layout[2]);
         draw_clipboard_status(f, app, main_layout[3]);
 
-        if app.show_delete_confirmation_dialog {
+        if app.delete_dialog.show_confirmation_dialog {
             draw_delete_confirmation_dialog(f, app);
         }
         if app.command_state.is_active {
@@ -198,11 +198,11 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
-    let mut value_block_title = match &app.active_leaf_key_name {
+    let mut value_block_title = match &app.value_viewer.active_leaf_key_name {
         Some(name) => {
             let ttl = app.ttl_map.get(name).copied().unwrap_or(-2);
             let ttl_str = format_ttl(ttl);
-            format!("Value: {} ({}) | TTL: {}", name, app.selected_key_type.as_deref().unwrap_or("N/A"), ttl_str)
+            format!("Value: {} ({}) | TTL: {}", name, app.value_viewer.selected_key_type.as_deref().unwrap_or("N/A"), ttl_str)
         },
         None => "Value".to_string(),
     };
@@ -211,11 +211,11 @@ fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
     }
     let block = Block::default().borders(Borders::ALL).title(value_block_title)
         .border_style(if app.is_value_view_focused { Style::default().fg(Color::Cyan) } else { Style::default() });
-    if let Some(lines) = &app.displayed_value_lines {
+    if let Some(lines) = &app.value_viewer.displayed_value_lines {
         let items: Vec<ListItem> = lines.iter().map(|s| ListItem::new(s.as_str())).collect();
         let mut list_state = ListState::default();
-        if !items.is_empty() && app.selected_value_sub_index < items.len() {
-            list_state.select(Some(app.selected_value_sub_index));
+        if !items.is_empty() && app.value_viewer.selected_value_sub_index < items.len() {
+            list_state.select(Some(app.value_viewer.selected_value_sub_index));
         }
         let list_widget = List::new(items)
             .block(block)
@@ -228,11 +228,11 @@ fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
             .highlight_symbol(if app.is_value_view_focused { ">> " } else { "  " });
         f.render_stateful_widget(list_widget, area, &mut list_state);
     } else {
-        let value_display_text = app.current_display_value.as_deref().unwrap_or("");
+        let value_display_text = app.value_viewer.current_display_value.as_deref().unwrap_or("");
         let value_paragraph = Paragraph::new(value_display_text)
             .block(block)
             .wrap(Wrap { trim: true })
-            .scroll(app.value_view_scroll);
+            .scroll(app.value_viewer.value_view_scroll);
         f.render_widget(value_paragraph, area);
     }
 }
@@ -269,7 +269,7 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" | "),
             Span::styled("Enter: activate", Style::default().fg(Color::Cyan)),
         ]);
-    } else if app.show_delete_confirmation_dialog {
+    } else if app.delete_dialog.show_confirmation_dialog {
         help_spans = vec![
             Span::styled("Confirm Deletion: ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
             Span::styled("[Y]es", Style::default().fg(Color::Green)),
@@ -304,8 +304,12 @@ fn draw_delete_confirmation_dialog(f: &mut Frame, app: &App) {
     let area = centered_rect(60, 25, f.area());
     f.render_widget(Clear, area); // Clear the background
 
-    let item_type = if app.deletion_is_folder { "folder" } else { "key" };
-    let item_name = app.key_to_delete_display_name.as_deref().unwrap_or("unknown");
+    let item_type = if app.delete_dialog.deletion_is_folder { "folder" } else { "key" };
+    let item_name = app
+        .delete_dialog
+        .key_to_delete_display_name
+        .as_deref()
+        .unwrap_or("unknown");
 
     let text = vec![
         Line::from(Span::styled(
@@ -313,10 +317,10 @@ fn draw_delete_confirmation_dialog(f: &mut Frame, app: &App) {
             Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
         )).alignment(Alignment::Center),
         Line::from("").alignment(Alignment::Center),
-        if app.deletion_is_folder {
-            Line::from(Span::raw(format!("This will delete the folder and ALL keys within prefix '{}'.", app.prefix_to_delete.as_deref().unwrap_or("N/A")))).alignment(Alignment::Center)
+        if app.delete_dialog.deletion_is_folder {
+            Line::from(Span::raw(format!("This will delete the folder and ALL keys within prefix '{}'.", app.delete_dialog.prefix_to_delete.as_deref().unwrap_or("N/A")))).alignment(Alignment::Center)
         } else {
-            Line::from(Span::raw(format!("This will permanently delete the key '{}'.", app.key_to_delete_full_path.as_deref().unwrap_or(item_name)))).alignment(Alignment::Center)
+            Line::from(Span::raw(format!("This will permanently delete the key '{}'.", app.delete_dialog.key_to_delete_full_path.as_deref().unwrap_or(item_name)))).alignment(Alignment::Center)
         },
         Line::from("").alignment(Alignment::Center),
         Line::from(Span::raw("This action CANNOT be undone.")).alignment(Alignment::Center),
@@ -352,7 +356,7 @@ fn draw_profile_selector_modal(f: &mut Frame, app: &App) {
         .enumerate()
         .map(|(idx, profile)| {
             let item_color = profile.resolved_color();
-            let style = if idx == app.selected_profile_list_index {
+            let style = if idx == app.profile_state.selected_index {
                 Style::default()
                     .fg(Color::Black)
                     .bg(item_color)
@@ -370,7 +374,7 @@ fn draw_profile_selector_modal(f: &mut Frame, app: &App) {
         .highlight_symbol(">> ");
     
     let mut list_state = ListState::default();
-    list_state.select(Some(app.selected_profile_list_index));
+    list_state.select(Some(app.profile_state.selected_index));
 
     f.render_stateful_widget(list_widget, area, &mut list_state);
 }
