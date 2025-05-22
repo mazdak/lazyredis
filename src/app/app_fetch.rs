@@ -22,7 +22,7 @@ impl App {
         }
     }
 
-    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+    pub async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
         let mut owned_cmd = redis::cmd("HGETALL");
         owned_cmd.arg(key_name);
         let fut = owned_cmd.query_async::<Vec<String>>(con);
@@ -57,7 +57,7 @@ impl App {
         .await;
     }
 
-    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+    pub async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
         let mut owned_cmd = redis::cmd("ZRANGE");
         owned_cmd.arg(key_name);
         owned_cmd.arg(0);
@@ -107,7 +107,7 @@ impl App {
         .await;
     }
 
-    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+    pub async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
         let mut owned_cmd = redis::cmd("LRANGE");
         owned_cmd.arg(key_name);
         owned_cmd.arg(0);
@@ -127,7 +127,7 @@ impl App {
         .await;
     }
 
-    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+    pub async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
         let mut owned_cmd = redis::cmd("SMEMBERS");
         owned_cmd.arg(key_name);
         let fut = owned_cmd.query_async::<Vec<String>>(con);
@@ -145,7 +145,7 @@ impl App {
         .await;
     }
 
-    async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
+    pub async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
         const GROUP_NAME: &str = "lazyredis_group";
         const CONSUMER_NAME: &str = "lazyredis_consumer";
 

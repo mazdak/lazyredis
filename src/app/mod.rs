@@ -1,5 +1,6 @@
 pub mod app_clipboard;
 mod app_fetch;
+pub mod redis_client;
 
 // use crate::search::SearchState;
 
@@ -8,11 +9,19 @@ mod app_fetch;
 use crate::config::ConnectionProfile;
 use crate::search::SearchState;
 use crate::command::CommandState;
-use redis::{Client, Value};
+// REMOVE: use redis::{Client};
 pub use redis::aio::MultiplexedConnection; // Re-export for other modules
 // use tokio::task; // Moved to app_clipboard.rs, check if needed elsewhere here.
 use std::collections::HashMap;
 // use crossclip::{Clipboard, SystemClipboard}; // Moved to app_clipboard.rs
+use crate::app::redis_client::{RedisClient};
+// REMOVE: use crate::app::app_fetch::{
+//     fetch_and_set_hash_value,
+//     fetch_and_set_zset_value,
+//     fetch_and_set_list_value,
+//     fetch_and_set_set_value,
+//     fetch_and_set_stream_value,
+// };
 
 // StreamEntry struct definition
 #[derive(Debug, Clone)] 
@@ -44,8 +53,7 @@ pub enum PendingOperation {
 pub struct App {
     pub selected_db_index: usize,
     pub db_count: u8,
-    pub redis_client: Option<Client>,
-    pub redis_connection: Option<MultiplexedConnection>,
+    pub redis: RedisClient,
     pub connection_status: String,
     pub profiles: Vec<ConnectionProfile>,
     pub current_profile_index: usize,
@@ -99,8 +107,7 @@ impl App {
         let mut app = App {
             selected_db_index: 0, 
             db_count: 16, 
-            redis_client: None,
-            redis_connection: None,
+            redis: RedisClient::new(),
             connection_status: format!("Initializing for {} ({})...", initial_profile_name, initial_url),
             profiles,
             current_profile_index: 0, 
@@ -169,63 +176,24 @@ impl App {
     async fn connect_to_profile(&mut self, profile_index: usize, use_profile_db: bool) {
         if profile_index >= self.profiles.len() {
             self.connection_status = format!("Error: Profile index {} out of bounds.", profile_index);
-            self.redis_client = None;
-            self.redis_connection = None;
             return;
         }
 
         let profile = &self.profiles[profile_index];
         self.connection_status = format!("Connecting to {} ({})...", profile.name, profile.url);
-
         tokio::task::yield_now().await;
 
-        if use_profile_db {
-            if let Some(db) = profile.db {
-                self.selected_db_index = db as usize;
+        // Use the new RedisClient abstraction
+        match self.redis.connect_to_profile(profile, use_profile_db).await {
+            Ok(()) => {
+                self.selected_db_index = self.redis.db_index;
+                self.connection_status = self.redis.connection_status.clone();
+                self.fetch_keys_and_build_tree().await;
+            }
+            Err(e) => {
+                self.connection_status = format!("Failed to connect: {}", e);
             }
         }
-
-        let client = match Client::open(profile.url.as_str()) {
-            Ok(c) => c,
-            Err(e) => {
-                self.connection_status = format!("Failed to create client for {}: {}", profile.name, e);
-                self.redis_client = None;
-                self.redis_connection = None;
-                return;
-            }
-        };
-        self.redis_client = Some(client);
-
-        let mut connection = match self.redis_client.as_ref().unwrap().get_multiplexed_async_connection().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                self.connection_status = format!("Failed to get connection for {}: {}", profile.name, e);
-                self.redis_client = None;
-                self.redis_connection = None;
-                return;
-            }
-        };
-
-        let db_to_select = if use_profile_db {
-            profile.db.unwrap_or(self.selected_db_index as u8)
-        } else {
-            self.selected_db_index as u8
-        };
-
-        if let Err(e) = redis::cmd("SELECT").arg(db_to_select).query_async::<()>(&mut connection).await {
-            self.connection_status = format!("Failed to select DB {} on {}: {}", db_to_select, profile.name, e);
-            self.redis_client = None;
-            self.redis_connection = None;
-            return;
-        }
-
-        self.selected_db_index = db_to_select as usize;
-        self.redis_connection = Some(connection);
-        self.connection_status = format!(
-            "Connected to {} ({}), DB {}",
-            profile.name, profile.url, self.selected_db_index
-        );
-        self.fetch_keys_and_build_tree().await;
     }
 
     pub fn clear_selected_key_info(&mut self) {
@@ -252,55 +220,54 @@ impl App {
         self.selected_visible_key_index = 0;
         self.clear_selected_key_info();
 
-        if let Some(mut con) = self.redis_connection.take() {
-            self.connection_status = format!("Fetching keys from DB {}...", self.selected_db_index);
-            
-            tokio::task::yield_now().await;
-
-            let mut cursor: u64 = 0;
-            loop {
-                match redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH").arg("*")
-                    .arg("COUNT").arg(1000)
-                    .query_async::<(u64, Vec<String>)>(&mut con).await
-                {
-                    Ok((next_cursor, batch)) => {
-                        cursor = next_cursor;
-                        self.raw_keys.extend(batch);
-                        if !self.raw_keys.is_empty() {
-                            self.parse_keys_to_tree();
-                            self.update_visible_keys();
-                        }
-                        self.connection_status = format!(
-                            "Connected to DB {}. Found {} keys (cursor {}).",
-                            self.selected_db_index,
-                            self.raw_keys.len(),
-                            cursor
-                        );
-                        if cursor == 0 {
-                            break;
-                        }
+        let mut cursor: u64 = 0;
+        let mut con = match self.redis.connection.take() {
+            Some(con) => con,
+            None => {
+                self.connection_status = "Not connected. Cannot fetch keys.".to_string();
+                return;
+            }
+        };
+        loop {
+            match redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH").arg("*")
+                .arg("COUNT").arg(1000)
+                .query_async::<(u64, Vec<String>)>(&mut con).await
+            {
+                Ok((next_cursor, batch)) => {
+                    cursor = next_cursor;
+                    self.raw_keys.extend(batch);
+                    if !self.raw_keys.is_empty() {
+                        self.parse_keys_to_tree();
+                        self.update_visible_keys();
                     }
-                    Err(e) => {
-                        self.connection_status = format!("Failed during SCAN: {}", e);
+                    self.connection_status = format!(
+                        "Connected to DB {}. Found {} keys (cursor {}).",
+                        self.selected_db_index,
+                        self.raw_keys.len(),
+                        cursor
+                    );
+                    if cursor == 0 {
                         break;
                     }
                 }
-            }
-            if self.raw_keys.is_empty() {
-                self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
-            } else {
-                self.connection_status = format!(
-                    "Connected to DB {}. Found {} keys. Displaying {} top-level items.",
-                    self.selected_db_index,
-                    self.raw_keys.len(),
-                    self.visible_keys_in_current_view.len()
-                );
+                Err(e) => {
+                    self.connection_status = format!("Failed during SCAN: {}", e);
+                    break;
                 }
-            self.redis_connection = Some(con);
+            }
+        }
+        self.redis.connection = Some(con);
+        if self.raw_keys.is_empty() {
+            self.connection_status = format!("Connected to DB {}. No keys found.", self.selected_db_index);
         } else {
-            self.connection_status = "Not connected. Cannot fetch keys.".to_string();
+            self.connection_status = format!(
+                "Connected to DB {}. Found {} keys. Displaying {} top-level items.",
+                self.selected_db_index,
+                self.raw_keys.len(),
+                self.visible_keys_in_current_view.len()
+            );
         }
     }
     
@@ -380,72 +347,76 @@ impl App {
                     self.selected_key_type = Some("fetching...".to_string());
                     self.selected_value_sub_index = 0;
                     self.value_view_scroll = (0, 0);
-                    if let Some(mut con) = self.redis_connection.take() {
-                        // Fetch TTL and type for the selected key only
-                        let ttl = redis::cmd("TTL").arg(&actual_full_key_name).query_async::<i64>(&mut con).await.unwrap_or(-2);
-                        self.ttl_map.insert(actual_full_key_name.clone(), ttl);
-                        let key_type = redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await.unwrap_or("unknown".to_string());
-                        self.type_map.insert(actual_full_key_name.clone(), key_type.clone());
-                        match redis::cmd("GET").arg(&actual_full_key_name).query_async::<Option<String>>(&mut con).await {
-                            Ok(Some(value)) => {
-                                self.selected_key_type = Some("string".to_string());
-                                self.selected_key_value = Some(value);
-                            }
-                            Ok(None) => {
-                                self.selected_key_type = Some("string".to_string());
-                                self.selected_key_value = Some("(nil)".to_string());
-                            }
-                            Err(e_get) => {
-                                let mut is_wrong_type_error = false;
-                                if e_get.kind() == redis::ErrorKind::TypeError {
-                                    is_wrong_type_error = true;
-                                } else if e_get.kind() == redis::ErrorKind::ExtensionError {
-                                    if let Some(code) = e_get.code() {
-                                        if code == "WRONGTYPE" {
-                                            is_wrong_type_error = true;
-                                        }
+                    let mut con = match self.redis.connection.take() {
+                        Some(con) => con,
+                        None => {
+                            self.selected_key_type = Some("error".to_string());
+                            self.selected_key_value = Some("Error: No Redis connection to fetch key value.".to_string());
+                            self.update_current_display_value();
+                            return;
+                        }
+                    };
+                    // Fetch TTL and type for the selected key only
+                    let ttl = redis::cmd("TTL").arg(&actual_full_key_name).query_async::<i64>(&mut con).await.unwrap_or(-2);
+                    self.ttl_map.insert(actual_full_key_name.clone(), ttl);
+                    let key_type = redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await.unwrap_or("unknown".to_string());
+                    self.type_map.insert(actual_full_key_name.clone(), key_type.clone());
+                    match redis::cmd("GET").arg(&actual_full_key_name).query_async::<Option<String>>(&mut con).await {
+                        Ok(Some(value)) => {
+                            self.selected_key_type = Some("string".to_string());
+                            self.selected_key_value = Some(value);
+                        }
+                        Ok(None) => {
+                            self.selected_key_type = Some("string".to_string());
+                            self.selected_key_value = Some("(nil)".to_string());
+                        }
+                        Err(e_get) => {
+                            let mut is_wrong_type_error = false;
+                            if e_get.kind() == redis::ErrorKind::TypeError {
+                                is_wrong_type_error = true;
+                            } else if e_get.kind() == redis::ErrorKind::ExtensionError {
+                                if let Some(code) = e_get.code() {
+                                    if code == "WRONGTYPE" {
+                                        is_wrong_type_error = true;
                                     }
                                 }
-                                if is_wrong_type_error {
-                                    match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await {
-                                        Ok(key_type) => {
-                                            self.selected_key_type = Some(key_type.clone());
-                                            match key_type.as_str() {
-                                                "hash" => self.fetch_and_set_hash_value(&actual_full_key_name, &mut con).await,
-                                                "zset" => self.fetch_and_set_zset_value(&actual_full_key_name, &mut con).await,
-                                                "list" => self.fetch_and_set_list_value(&actual_full_key_name, &mut con).await,
-                                                "set" => self.fetch_and_set_set_value(&actual_full_key_name, &mut con).await,
-                                                "stream" => self.fetch_and_set_stream_value(&actual_full_key_name, &mut con).await,
-                                                _ => {
-                                                    self.selected_key_value = Some(format!(
-                                                        "Key is of type '{}'. Value view for this type not yet implemented.",
-                                                        key_type
-                                                    ));
-                                                }
+                            }
+                            if is_wrong_type_error {
+                                match redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await {
+                                    Ok(key_type) => {
+                                        self.selected_key_type = Some(key_type.clone());
+                                        match key_type.as_str() {
+                                            "hash" => self.fetch_and_set_hash_value(&actual_full_key_name, &mut con).await,
+                                            "zset" => self.fetch_and_set_zset_value(&actual_full_key_name, &mut con).await,
+                                            "list" => self.fetch_and_set_list_value(&actual_full_key_name, &mut con).await,
+                                            "set" => self.fetch_and_set_set_value(&actual_full_key_name, &mut con).await,
+                                            "stream" => self.fetch_and_set_stream_value(&actual_full_key_name, &mut con).await,
+                                            _ => {
+                                                self.selected_key_value = Some(format!(
+                                                    "Key is of type '{}'. Value view for this type not yet implemented.",
+                                                    key_type
+                                                ));
                                             }
                                         }
-                                        Err(e_type) => {
-                                            self.selected_key_type = Some("error (TYPE failed)".to_string());
-                                            self.selected_key_value = Some(format!(
-                                                "GET for '{}' failed (WRONGTYPE). Subsequent TYPE command also failed: {}",
-                                                actual_full_key_name, e_type
-                                            ));
-                                        }
                                     }
-                                } else {
-                                    self.selected_key_type = Some("error (GET failed)".to_string());
-                                    self.selected_key_value = Some(format!(
-                                        "Failed to GET key '{}': {} (Kind: {:?}, Code: {:?})",
-                                        actual_full_key_name, e_get, e_get.kind(), e_get.code()
-                                    ));
+                                    Err(e_type) => {
+                                        self.selected_key_type = Some("error (TYPE failed)".to_string());
+                                        self.selected_key_value = Some(format!(
+                                            "GET for '{}' failed (WRONGTYPE). Subsequent TYPE command also failed: {}",
+                                            actual_full_key_name, e_type
+                                        ));
+                                    }
                                 }
+                            } else {
+                                self.selected_key_type = Some("error (GET failed)".to_string());
+                                self.selected_key_value = Some(format!(
+                                    "Failed to GET key '{}': {} (Kind: {:?}, Code: {:?})",
+                                    actual_full_key_name, e_get, e_get.kind(), e_get.code()
+                                ));
                             }
                         }
-                        self.redis_connection = Some(con);
-                    } else {
-                        self.selected_key_type = Some("error".to_string());
-                        self.selected_key_value = Some("Error: No Redis connection to fetch key value.".to_string());
                     }
+                    self.redis.connection = Some(con);
                 } else {
                     self.selected_key_type = Some("error".to_string());
                     self.selected_key_value = Some(format!("Error: Key '{}' not found as leaf in tree at current level after traversal.", display_name));
@@ -760,56 +731,53 @@ impl App {
     }
 
     async fn delete_redis_prefix_async(&mut self, prefix: &str) -> Result<String, String> {
-        if let Some(mut con) = self.redis_connection.clone() {
-            let pattern = format!("{}{}", prefix, if prefix.ends_with(self.key_delimiter) { "*" } else { "*" });
-            let mut keys_to_delete: Vec<String> = Vec::new();
-            let mut cursor: u64 = 0;
-
-            loop {
-                match redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH").arg(&pattern)
-                    .arg("COUNT").arg(100) 
-                    .query_async::<(u64, Vec<String>)>(&mut con).await 
-                {
-                    Ok((next_cursor, batch)) => {
-                        keys_to_delete.extend(batch);
-                        if next_cursor == 0 {
-                            break;
-                        }
-                        cursor = next_cursor;
+        let pattern = format!("{}{}", prefix, if prefix.ends_with(self.key_delimiter) { "*" } else { "*" });
+        let mut keys_to_delete: Vec<String> = Vec::new();
+        let mut cursor: u64 = 0;
+        let mut con = match self.redis.connection.take() {
+            Some(con) => con,
+            None => return Err("No Redis connection available for deleting prefix.".to_string()),
+        };
+        loop {
+            match redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH").arg(&pattern)
+                .arg("COUNT").arg(100)
+                .query_async::<(u64, Vec<String>)>(&mut con).await
+            {
+                Ok((next_cursor, batch)) => {
+                    keys_to_delete.extend(batch);
+                    if next_cursor == 0 {
+                        break;
                     }
-                    Err(e) => return Err(format!("Error scanning keys for prefix {}: {}", prefix, e.to_string())),
+                    cursor = next_cursor;
                 }
+                Err(e) => return Err(format!("Error scanning keys for prefix {}: {}", prefix, e.to_string())),
             }
-            
-            if keys_to_delete.is_empty() {
-                return Ok(format!("No keys found matching prefix '{}'.", prefix));
-            }
-
-            match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query_async::<i32>(&mut con).await { 
-                Ok(count) => Ok(format!("Deleted {} keys matching prefix '{}'.", count, prefix)),
-                Err(e) => Err(format!("Error deleting keys for prefix {}: {}", prefix, e.to_string())),
-            }
-        } else {
-            Err("No Redis connection available for deleting prefix.".to_string())
+        }
+        if keys_to_delete.is_empty() {
+            return Ok(format!("No keys found matching prefix '{}'.", prefix));
+        }
+        match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query_async::<i32>(&mut con).await {
+            Ok(count) => Ok(format!("Deleted {} keys matching prefix '{}'.", count, prefix)),
+            Err(e) => Err(format!("Error deleting keys for prefix {}: {}", prefix, e.to_string())),
         }
     }
 
     async fn delete_redis_key_async(&mut self, full_key: &str) -> Result<String, String> {
-        if let Some(mut con) = self.redis_connection.clone() { 
-            match redis::cmd("DEL").arg(full_key).query_async::<i32>(&mut con).await { 
-                Ok(count) => {
-                    if count > 0 {
-                        Ok(format!("Deleted key '{}'.", full_key))
-                    } else {
-                        Ok(format!("Key '{}' not found or already deleted.", full_key))
-                    }
+        let mut con = match self.redis.connection.take() {
+            Some(con) => con,
+            None => return Err("No Redis connection available for deleting key.".to_string()),
+        };
+        match redis::cmd("DEL").arg(full_key).query_async::<i32>(&mut con).await {
+            Ok(count) => {
+                if count > 0 {
+                    Ok(format!("Deleted key '{}'.", full_key))
+                } else {
+                    Ok(format!("Key '{}' not found or already deleted.", full_key))
                 }
-                Err(e) => Err(format!("Error deleting key {}: {}", full_key, e.to_string())),
             }
-        } else {
-            Err("No Redis connection available for deleting key.".to_string())
+            Err(e) => Err(format!("Error deleting key {}: {}", full_key, e.to_string())),
         }
     }
 
@@ -920,7 +888,7 @@ impl App {
     }
 
     pub async fn execute_command_input(&mut self) {
-        self.command_state.execute_command(&mut self.redis_connection).await;
+        self.command_state.execute_command(&mut self.redis.connection).await;
     }
 }
 

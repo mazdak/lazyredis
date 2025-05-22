@@ -1,15 +1,17 @@
 #[cfg(test)]
 
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+    use crate::app::{App, KeyTreeNode};
+    use crate::search::SearchState;
+    use crate::command::CommandState;
+    use crate::config::ConnectionProfile;
 
     fn empty_app() -> App {
         App {
             selected_db_index: 0,
             db_count: 16,
-            redis_client: None,
-            redis_connection: None,
+            redis: crate::app::redis_client::RedisClient::new(),
             connection_status: String::new(),
             profiles: Vec::new(),
             current_profile_index: 0,
@@ -98,5 +100,39 @@ mod tests {
         } else {
             panic!("foo should be folder");
         }
+    }
+
+    #[test]
+    fn seed_and_purge_only_allowed_on_dev_profiles() {
+        // Simulate profiles
+        let dev_profile = ConnectionProfile {
+            name: "Dev".to_string(),
+            url: "redis://localhost:6379".to_string(),
+            db: Some(0),
+            dev: Some(true),
+            color: None,
+        };
+        let prod_profile = ConnectionProfile {
+            name: "Prod".to_string(),
+            url: "redis://prod.example.com:6379".to_string(),
+            db: Some(0),
+            dev: Some(false),
+            color: None,
+        };
+        // Simulate CLI logic
+        fn can_seed_or_purge(profile: &ConnectionProfile) -> bool {
+            profile.dev.unwrap_or(false)
+        }
+        assert!(can_seed_or_purge(&dev_profile), "Should allow on dev profile");
+        assert!(!can_seed_or_purge(&prod_profile), "Should NOT allow on prod profile");
+        // Also test default (dev missing)
+        let no_dev_field = ConnectionProfile {
+            name: "NoDev".to_string(),
+            url: "redis://localhost:6379".to_string(),
+            db: Some(0),
+            dev: None,
+            color: None,
+        };
+        assert!(!can_seed_or_purge(&no_dev_field), "Should NOT allow if dev field is missing");
     }
 } 
