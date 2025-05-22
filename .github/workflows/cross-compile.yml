@@ -184,5 +184,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ matrix.target }}
+          name: lazyredis-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/lazyredis

@@ -19,6 +19,17 @@ delete keys or whole key prefixes, and seed a Redis instance with sample data fo
 
 ## Installation
 
+### Pre-built / Homebrew (Mac):
+```bash
+brew tap mazdak/lazyredis
+brew install lazyredis
+```
+
+Pre-build Linux Binaries are available on Github:
+https://github.com/mazdak/lazyredis/releases
+
+### Install From Source:
+
 1. Install [Rust and Cargo](https://rustup.rs/).
 2. Clone this repository:
    ```bash
