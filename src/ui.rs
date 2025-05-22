@@ -356,7 +356,7 @@ fn draw_profile_selector_modal(f: &mut Frame, app: &App) {
         .enumerate()
         .map(|(idx, profile)| {
             let item_color = profile.resolved_color();
-            let style = if idx == app.selected_profile_list_index {
+            let style = if idx == app.profile_state.selected_index {
                 Style::default()
                     .fg(Color::Black)
                     .bg(item_color)
@@ -374,7 +374,7 @@ fn draw_profile_selector_modal(f: &mut Frame, app: &App) {
         .highlight_symbol(">> ");
     
     let mut list_state = ListState::default();
-    list_state.select(Some(app.selected_profile_list_index));
+    list_state.select(Some(app.profile_state.selected_index));
 
     f.render_stateful_widget(list_widget, area, &mut list_state);
 }

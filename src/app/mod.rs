@@ -165,8 +165,15 @@ impl App {
         self.connection_status = format!("Connecting to {} ({})...", profile.name, profile.url);
         tokio::task::yield_now().await;
 
+        // Determine the target_db_index_override based on use_profile_db
+        let target_db_override = if use_profile_db {
+            None // When using profile_db, no override is needed
+        } else {
+            Some(self.selected_db_index) // When not using profile_db (i.e. manual DB select), pass current app selection
+        };
+
         // Use the new RedisClient abstraction
-        match self.redis.connect_to_profile(profile, use_profile_db).await {
+        match self.redis.connect_to_profile(profile, use_profile_db, target_db_override).await {
             Ok(()) => {
                 self.selected_db_index = self.redis.db_index;
                 self.connection_status = self.redis.connection_status.clone();
@@ -473,11 +480,13 @@ impl App {
     pub fn cycle_focus_backward(&mut self) {
         if self.is_value_view_focused {
             self.is_value_view_focused = false;
-            self.is_key_view_focused = true;
+            self.is_key_view_focused = false; // DB selector focus
         } else if self.is_key_view_focused {
             self.is_key_view_focused = false;
+            self.is_value_view_focused = true;
         } else { 
-            self.is_value_view_focused = true; 
+            self.is_key_view_focused = true; 
+            self.is_value_view_focused = false;
         }
     }
 
@@ -487,6 +496,7 @@ impl App {
             self.is_value_view_focused = true;
         } else if self.is_value_view_focused {
             self.is_value_view_focused = false;
+            // Now, neither is focused: DB selector focus
         } else { 
             self.is_key_view_focused = true;
         }

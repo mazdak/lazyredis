@@ -30,6 +30,8 @@ mod tests {
             is_key_view_focused: false, 
             value_viewer: ValueViewer::default(),
             is_value_view_focused: false,
+            scan_cursor: 0,
+            keys_fully_loaded: false,
             clipboard_status: None,
             search_state: SearchState::new(),
             delete_dialog: DeleteDialogState::default(),
