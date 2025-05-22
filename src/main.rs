@@ -257,7 +257,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                     // This prevents inputs from interfering with an ongoing async task's state changes
                     // or triggering new operations while one is in progress.
                     if app.pending_operation.is_none() {
-                        if app.is_profile_selector_active {
+                        if app.profile_state.is_active {
                             match key.code {
                                 KeyCode::Char('q') => return Ok(()),
                                 KeyCode::Char('p') | KeyCode::Esc => app.toggle_profile_selector(),
@@ -268,7 +268,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                 }
                                 _ => {}
                             }
-                        } else if app.show_delete_confirmation_dialog {
+                        } else if app.delete_dialog.show_confirmation_dialog {
                             match key.code {
                                 KeyCode::Enter => {
                                     app.pending_operation = Some(app::PendingOperation::ConfirmDeleteItem);

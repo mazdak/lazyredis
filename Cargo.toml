@@ -1,6 +1,6 @@
 [package]
 name = "lazyredis"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 
 [dependencies]
@@ -20,4 +20,3 @@ anyhow = "1"
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3.0.0"
-
