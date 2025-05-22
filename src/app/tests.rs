@@ -3,6 +3,9 @@
 mod tests {
     use std::collections::HashMap;
     use crate::app::{App, KeyTreeNode};
+    use crate::app::value_viewer::ValueViewer;
+    use crate::app::state_profile_selector::ProfileSelectorState;
+    use crate::app::state_delete_dialog::DeleteDialogState;
     use crate::search::SearchState;
     use crate::command::CommandState;
     use crate::config::ConnectionProfile;
@@ -15,8 +18,7 @@ mod tests {
             connection_status: String::new(),
             profiles: Vec::new(),
             current_profile_index: 0,
-            is_profile_selector_active: false,
-            selected_profile_list_index: 0,
+            profile_state: ProfileSelectorState::default(),
             raw_keys: Vec::new(),
             key_tree: HashMap::new(),
             current_breadcrumb: Vec::new(),
@@ -26,26 +28,11 @@ mod tests {
             selected_visible_key_index: 0,
             key_delimiter: ':',
             is_key_view_focused: false, 
-            active_leaf_key_name: None, 
-            selected_key_type: None,    
-            selected_key_value: None,   
-            selected_key_value_hash: None,
-            selected_key_value_zset: None, 
-            selected_key_value_list: None,
-            selected_key_value_set: None,
-            selected_key_value_stream: None,
-            is_value_view_focused: false, 
-            value_view_scroll: (0, 0),    
-            clipboard_status: None, 
-            current_display_value: None, 
-            displayed_value_lines: None,
-            selected_value_sub_index: 0,
+            value_viewer: ValueViewer::default(),
+            is_value_view_focused: false,
+            clipboard_status: None,
             search_state: SearchState::new(),
-            show_delete_confirmation_dialog: false,
-            key_to_delete_display_name: None,
-            key_to_delete_full_path: None,
-            prefix_to_delete: None,
-            deletion_is_folder: false,
+            delete_dialog: DeleteDialogState::default(),
             command_state: CommandState::new(),
             pending_operation: None,
         }

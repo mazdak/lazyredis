@@ -46,9 +46,9 @@ pub async fn copy_selected_key_value_to_clipboard(app: &mut App) {
 
     if app.is_value_view_focused {
         // Value view is focused: copy the selected sub-item
-        if let Some(lines) = &app.displayed_value_lines {
-            if !lines.is_empty() && app.selected_value_sub_index < lines.len() {
-                value_to_copy = Some(lines[app.selected_value_sub_index].clone());
+        if let Some(lines) = &app.value_viewer.displayed_value_lines {
+            if !lines.is_empty() && app.value_viewer.selected_value_sub_index < lines.len() {
+                value_to_copy = Some(lines[app.value_viewer.selected_value_sub_index].clone());
             } else {
                 app.clipboard_status = Some("No specific value item selected to copy.".to_string());
             }
@@ -57,12 +57,12 @@ pub async fn copy_selected_key_value_to_clipboard(app: &mut App) {
         }
     } else {
         // Key view is focused (or no specific sub-item focus): copy the whole value representation
-        if app.active_leaf_key_name.is_some() {
-            if let Some(lines) = &app.displayed_value_lines {
+        if app.value_viewer.active_leaf_key_name.is_some() {
+            if let Some(lines) = &app.value_viewer.displayed_value_lines {
                 if !lines.is_empty() {
                     value_to_copy = Some(lines.join("\n"));
                 } else {
-                    if let Some(cvd) = &app.current_display_value {
+                    if let Some(cvd) = &app.value_viewer.current_display_value {
                         if !cvd.starts_with("(") || !cvd.ends_with(")") {
                             value_to_copy = Some(cvd.clone());
                         } else {
@@ -72,7 +72,7 @@ pub async fn copy_selected_key_value_to_clipboard(app: &mut App) {
                          app.clipboard_status = Some("No value content to copy (displayed_value_lines is empty).".to_string());
                     }
                 }
-            } else if let Some(s_val) = &app.current_display_value {
+            } else if let Some(s_val) = &app.value_viewer.current_display_value {
                 value_to_copy = Some(s_val.clone());
             } else {
                 app.clipboard_status = Some("No value available to copy for the selected key.".to_string());
