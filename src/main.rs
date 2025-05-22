@@ -291,6 +291,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                 KeyCode::Char(c) => {
                                     app.command_state.input_buffer.push(c);
                                 }
+                                KeyCode::Enter => {
+                                    app.pending_operation = Some(app::PendingOperation::ExecuteCommand);
+                                }
                                 _ => {}
                             }
                         } else if app.search_state.is_active {
