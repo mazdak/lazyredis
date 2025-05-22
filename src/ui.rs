@@ -63,7 +63,7 @@ pub fn ui(f: &mut Frame, app: &App) {
         if app.show_delete_confirmation_dialog {
             draw_delete_confirmation_dialog(f, app);
         }
-        if app.is_command_prompt_active {
+        if app.command_state.is_active {
             draw_command_prompt_modal(f, app);
         }
     }
@@ -141,9 +141,9 @@ fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
     let mut key_view_base_title = format!("Keys: {}", app.current_breadcrumb.join(&app.key_delimiter.to_string()));
-    if app.is_search_active {
+    if app.search_state.is_active {
         // For global search, breadcrumb is less relevant in title, show search query
-        key_view_base_title = format!("Search Results (Global): {}", app.search_query);
+        key_view_base_title = format!("Search Results (Global): {}", app.search_state.query);
     }
 
     let key_view_title = if app.is_key_view_focused {
@@ -152,8 +152,8 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
         key_view_base_title
     };
 
-    let key_items: Vec<ListItem> = if app.is_search_active {
-        app.filtered_keys_in_current_view
+    let key_items: Vec<ListItem> = if app.search_state.is_active {
+        app.search_state.filtered_keys
             .iter()
             .map(|full_key_name| {
                 let ttl = app.ttl_map.get(full_key_name).copied().unwrap_or(-2);
@@ -182,8 +182,8 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
             .collect()
     };
 
-    let selected_key_index = if app.is_search_active {
-        app.selected_filtered_key_index
+    let selected_key_index = if app.search_state.is_active {
+        app.search_state.selected_index
     } else {
         app.selected_visible_key_index
     };
@@ -261,9 +261,9 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" | "),
         Span::styled("p: profiles", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
-        Span::styled("j/k/↑/↓: nav keys/vals", Style::default().fg(Color::Yellow)), // Updated nav help
+        Span::styled("j/k/↑/↓: nav keys/vals", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
-        Span::styled("PgUp/PgDn: page nav vals", Style::default().fg(Color::Yellow)), // Added page nav for values
+        Span::styled("PgUp/PgDn: page nav vals", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
         Span::styled("Tab/S-Tab: focus", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
@@ -277,14 +277,10 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" | "),
         Span::styled("/: search", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
-        Span::styled("d: del", Style::default().fg(Color::Yellow)), // Added delete help
-        Span::raw(" | "),
-        Span::styled("s: sort", Style::default().fg(Color::Yellow)),
-        Span::raw(" | "),
-        Span::styled("f: expiring", Style::default().fg(Color::Yellow)),
+        Span::styled("d: del", Style::default().fg(Color::Yellow)),
     ];
 
-    if app.is_search_active {
+    if app.search_state.is_active {
         help_spans.extend(vec![
             Span::raw(" | "),
             Span::styled("Esc: exit search", Style::default().fg(Color::Cyan)),
@@ -298,7 +294,7 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" / "),
             Span::styled("[N]o (Esc)", Style::default().fg(Color::Red)),
         ];
-    } else if !app.is_command_prompt_active {
+    } else if !app.command_state.is_active {
         help_spans.extend(vec![
             Span::raw(" | "),
             Span::styled(":: cmd", Style::default().fg(Color::Cyan)),
@@ -401,16 +397,16 @@ fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
     let area = centered_rect(70, 30, f.area());
     f.render_widget(Clear, area);
 
-    let input_line_text = format!("CMD> {}", app.command_input);
+    let input_line_text = format!("CMD> {}", app.command_state.input_buffer);
     // Calculate cursor position: area.x + "CMD> ".len() + current command_input length
     // Ensure cursor position is within the bounds of the modal.
-    let cursor_x = area.x + 6 + app.command_input.chars().count() as u16;
+    let cursor_x = area.x + 6 + app.command_state.input_buffer.chars().count() as u16;
     let cursor_y = area.y + 3; // Corrected: Was area.y + 4, should be on the input line
 
     // Only set cursor if the command prompt is active and focused (implicitly handled by modal display)
     f.set_cursor_position(Position::new(cursor_x, cursor_y));
 
-    let output = app.command_output.as_deref().unwrap_or("");
+    let output = app.command_state.last_result.as_deref().unwrap_or("");
 
     let text = vec![
         Line::from(Span::styled(
