@@ -1,4 +1,5 @@
 pub mod app_clipboard;
+mod app_fetch;
 
 // use crate::search::SearchState;
 
@@ -11,7 +12,6 @@ use redis::{Client, Value};
 pub use redis::aio::MultiplexedConnection; // Re-export for other modules
 // use tokio::task; // Moved to app_clipboard.rs, check if needed elsewhere here.
 use std::collections::HashMap;
-use std::future::Future;
 // use crossclip::{Clipboard, SystemClipboard}; // Moved to app_clipboard.rs
 
 // StreamEntry struct definition
@@ -176,7 +176,7 @@ impl App {
 
         let profile = &self.profiles[profile_index];
         self.connection_status = format!("Connecting to {} ({})...", profile.name, profile.url);
-        
+
         tokio::task::yield_now().await;
 
         if use_profile_db {
@@ -185,50 +185,47 @@ impl App {
             }
         }
 
-        match Client::open(profile.url.as_str()) {
-            Ok(client) => {
-                self.redis_client = Some(client);
-                match self.redis_client.as_ref().unwrap().get_multiplexed_async_connection().await {
-                    Ok(mut connection) => {
-                        let db_to_select = if use_profile_db {
-                            profile.db.unwrap_or(self.selected_db_index as u8)
-                        } else {
-                            self.selected_db_index as u8
-                        };
-                        match redis::cmd("SELECT").arg(db_to_select).query_async::<()>(&mut connection).await {
-                            Ok(_) => {
-                                self.selected_db_index = db_to_select as usize;
-                                self.redis_connection = Some(connection);
-                                self.connection_status = format!(
-                                    "Connected to {} ({}), DB {}",
-                                    profile.name, profile.url, self.selected_db_index
-                                );
-                                self.fetch_keys_and_build_tree().await;
-                            }
-                            Err(e) => {
-                                self.connection_status = format!(
-                                    "Failed to select DB {} on {}: {}",
-                                    db_to_select, profile.name, e
-                                );
-                                self.redis_client = None;
-                                self.redis_connection = None;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.connection_status =
-                            format!("Failed to get connection for {}: {}", profile.name, e);
-                        self.redis_client = None;
-                        self.redis_connection = None;
-                    }
-                }
-            }
+        let client = match Client::open(profile.url.as_str()) {
+            Ok(c) => c,
             Err(e) => {
                 self.connection_status = format!("Failed to create client for {}: {}", profile.name, e);
                 self.redis_client = None;
                 self.redis_connection = None;
+                return;
             }
+        };
+        self.redis_client = Some(client);
+
+        let mut connection = match self.redis_client.as_ref().unwrap().get_multiplexed_async_connection().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                self.connection_status = format!("Failed to get connection for {}: {}", profile.name, e);
+                self.redis_client = None;
+                self.redis_connection = None;
+                return;
+            }
+        };
+
+        let db_to_select = if use_profile_db {
+            profile.db.unwrap_or(self.selected_db_index as u8)
+        } else {
+            self.selected_db_index as u8
+        };
+
+        if let Err(e) = redis::cmd("SELECT").arg(db_to_select).query_async::<()>(&mut connection).await {
+            self.connection_status = format!("Failed to select DB {} on {}: {}", db_to_select, profile.name, e);
+            self.redis_client = None;
+            self.redis_connection = None;
+            return;
         }
+
+        self.selected_db_index = db_to_select as usize;
+        self.redis_connection = Some(connection);
+        self.connection_status = format!(
+            "Connected to {} ({}), DB {}",
+            profile.name, profile.url, self.selected_db_index
+        );
+        self.fetch_keys_and_build_tree().await;
     }
 
     pub fn clear_selected_key_info(&mut self) {
@@ -456,217 +453,6 @@ impl App {
             }
         }
         self.update_current_display_value();
-    }
-
-    async fn run_fetch<T, Fut, OkF, ErrF>(&mut self, fut: Fut, on_ok: OkF, on_err: ErrF, err_msg: String)
-    where
-        Fut: Future<Output = redis::RedisResult<T>>,
-        OkF: FnOnce(&mut Self, T),
-        ErrF: FnOnce(&mut Self),
-    {
-        match fut.await {
-            Ok(val) => {
-                on_ok(self, val);
-                self.selected_key_value = None;
-            }
-            Err(e) => {
-                self.selected_key_value = Some(format!("{}: {}", err_msg, e));
-                on_err(self);
-            }
-        }
-    }
-
-    async fn fetch_and_set_hash_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        let mut owned_cmd = redis::cmd("HGETALL");
-        owned_cmd.arg(key_name);
-        let fut = owned_cmd.query_async::<Vec<String>>(con);
-        let err_context = format!("Failed to HGETALL for '{}' (hash)", key_name);
-        self.run_fetch(
-            fut,
-            |app, pairs| {
-                if pairs.is_empty() {
-                    app.selected_key_value_hash = Some(Vec::new());
-                } else {
-                    let mut hash_data: Vec<(String, String)> = Vec::new();
-                    for chunk in pairs.chunks(2) {
-                        if chunk.len() == 2 {
-                            hash_data.push((chunk[0].clone(), chunk[1].clone()));
-                        } else {
-                            app.selected_key_value = Some(format!(
-                                "HGETALL for '{}' (hash) returned malformed pair data.",
-                                key_name
-                            ));
-                            app.selected_key_value_hash = None;
-                            return;
-                        }
-                    }
-                    app.selected_key_value_hash = Some(hash_data);
-                }
-            },
-            |app| {
-                app.selected_key_value_hash = None;
-            },
-            err_context,
-        )
-        .await;
-    }
-
-    async fn fetch_and_set_zset_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        let mut owned_cmd = redis::cmd("ZRANGE");
-        owned_cmd.arg(key_name);
-        owned_cmd.arg(0);
-        owned_cmd.arg(-1);
-        owned_cmd.arg("WITHSCORES");
-        let fut = owned_cmd.query_async::<Vec<String>>(con);
-        let err_context = format!("Failed to ZRANGE for '{}' (zset)", key_name);
-        self.run_fetch(
-            fut,
-            |app, pairs| {
-                if pairs.is_empty() {
-                    app.selected_key_value_zset = Some(Vec::new());
-                } else {
-                    let mut zset_data: Vec<(String, f64)> = Vec::new();
-                    for chunk in pairs.chunks(2) {
-                        if chunk.len() == 2 {
-                            let member = chunk[0].clone();
-                            match chunk[1].parse::<f64>() {
-                                Ok(score) => zset_data.push((member, score)),
-                                Err(_) => {
-                                    app.selected_key_value = Some(format!(
-                                        "ZRANGE for '{}' (zset) failed to parse score for member '{}'.",
-                                        key_name,
-                                        member
-                                    ));
-                                    app.selected_key_value_zset = None;
-                                    return;
-                                }
-                            }
-                        } else {
-                            app.selected_key_value = Some(format!(
-                                "ZRANGE for '{}' (zset) returned malformed pair data.",
-                                key_name
-                            ));
-                            app.selected_key_value_zset = None;
-                            return;
-                        }
-                    }
-                    app.selected_key_value_zset = Some(zset_data);
-                }
-            },
-            |app| {
-                app.selected_key_value_zset = None;
-            },
-            err_context,
-        )
-        .await;
-    }
-
-    async fn fetch_and_set_list_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        let mut owned_cmd = redis::cmd("LRANGE");
-        owned_cmd.arg(key_name);
-        owned_cmd.arg(0);
-        owned_cmd.arg(-1);
-        let fut = owned_cmd.query_async::<Vec<String>>(con);
-        let err_context = format!("Failed to LRANGE for '{}' (list)", key_name);
-        self.run_fetch(
-            fut,
-            |app, elements| {
-                app.selected_key_value_list = Some(elements);
-            },
-            |app| {
-                app.selected_key_value_list = None;
-            },
-            err_context,
-        )
-        .await;
-    }
-
-    async fn fetch_and_set_set_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        let mut owned_cmd = redis::cmd("SMEMBERS");
-        owned_cmd.arg(key_name);
-        let fut = owned_cmd.query_async::<Vec<String>>(con);
-        let err_context = format!("Failed to SMEMBERS for '{}' (set)", key_name);
-        self.run_fetch(
-            fut,
-            |app, members| {
-                app.selected_key_value_set = Some(members);
-            },
-            |app| {
-                app.selected_key_value_set = None;
-            },
-            err_context,
-        )
-        .await;
-    }
-
-    async fn fetch_and_set_stream_value(&mut self, key_name: &str, con: &mut MultiplexedConnection) {
-        const GROUP_NAME: &str = "lazyredis_group";
-        const CONSUMER_NAME: &str = "lazyredis_consumer";
-
-        let _ = redis::cmd("XGROUP")
-            .arg("CREATE").arg(key_name).arg(GROUP_NAME).arg("$").arg("MKSTREAM")
-            .query_async::<()>(con).await;
-
-        match redis::cmd("XREADGROUP")
-            .arg("GROUP").arg(GROUP_NAME).arg(CONSUMER_NAME)
-            .arg("COUNT").arg(100)
-            .arg("STREAMS").arg(key_name).arg(">")
-            .query_async::<Value>(con).await
-        {
-            Ok(Value::Nil) => {
-                self.selected_key_value_stream = Some(Vec::new());
-                self.selected_key_value = None;
-                self.current_display_value = Some("(empty stream or no new messages)".to_string());
-                self.displayed_value_lines = None;
-            },
-            Ok(Value::Array(stream_data)) => { 
-                let mut parsed_streams: Vec<StreamEntry> = Vec::new();
-                for single_stream_result in stream_data {
-                    if let Value::Array(stream_specific_data) = single_stream_result {
-                        if stream_specific_data.len() == 2 {
-                            if let Value::Array(messages) = &stream_specific_data[1] {
-                                for message_val in messages {
-                                    if let Value::Array(message_parts) = message_val { 
-                                        if message_parts.len() == 2 {
-                                            if let Value::BulkString(id_bytes) = &message_parts[0] { 
-                                                let id = String::from_utf8_lossy(id_bytes).to_string();
-                                                if let Value::Array(fields_data) = &message_parts[1] {
-                                                    let mut fields = Vec::new();
-                                                    for i in (0..fields_data.len()).step_by(2) {
-                                                        if i + 1 < fields_data.len() {
-                                                            if let (Value::BulkString(f_bytes), Value::BulkString(v_bytes)) = (&fields_data[i], &fields_data[i+1]) {
-                                                                fields.push((
-                                                                    String::from_utf8_lossy(f_bytes).to_string(),
-                                                                    String::from_utf8_lossy(v_bytes).to_string()
-                                                                ));
-                                                            }
-                                                        }
-                                                    }
-                                                    parsed_streams.push(StreamEntry { id, fields });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                self.selected_key_value_stream = Some(parsed_streams);
-                self.selected_key_value = None;
-                self.update_current_display_value(); 
-            },
-            Ok(other_value) => {
-                self.selected_key_value_stream = None;
-                self.selected_key_value = Some(format!("Unexpected value structure from XREADGROUP: {:?}", other_value));
-                self.update_current_display_value();
-            },
-            Err(e) => {
-                self.selected_key_value_stream = None;
-                self.selected_key_value = Some(format!("Error fetching stream: {}", e));
-                self.update_current_display_value();
-            }
-        }
     }
 
     fn update_current_display_value(&mut self) {
@@ -1138,104 +924,6 @@ impl App {
     }
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn empty_app() -> App {
-        App {
-            selected_db_index: 0,
-            db_count: 16,
-            redis_client: None,
-            redis_connection: None,
-            connection_status: String::new(),
-            profiles: Vec::new(),
-            current_profile_index: 0,
-            is_profile_selector_active: false,
-            selected_profile_list_index: 0,
-            raw_keys: Vec::new(),
-            key_tree: HashMap::new(),
-            current_breadcrumb: Vec::new(),
-            visible_keys_in_current_view: Vec::new(),
-            ttl_map: HashMap::new(),
-            type_map: HashMap::new(),
-            selected_visible_key_index: 0,
-            key_delimiter: ':',
-            is_key_view_focused: false, 
-            active_leaf_key_name: None, 
-            selected_key_type: None,    
-            selected_key_value: None,   
-            selected_key_value_hash: None,
-            selected_key_value_zset: None, 
-            selected_key_value_list: None,
-            selected_key_value_set: None,
-            selected_key_value_stream: None,
-            is_value_view_focused: false, 
-            value_view_scroll: (0, 0),    
-            clipboard_status: None, 
-            current_display_value: None, 
-            displayed_value_lines: None,
-            selected_value_sub_index: 0,
-            search_state: SearchState::new(),
-            show_delete_confirmation_dialog: false,
-            key_to_delete_display_name: None,
-            key_to_delete_full_path: None,
-            prefix_to_delete: None,
-            deletion_is_folder: false,
-            command_state: CommandState::new(),
-            pending_operation: None,
-        }
-    }
-
-    #[test]
-    fn builds_tree_with_nested_keys() {
-        let mut app = empty_app();
-        app.raw_keys = vec![
-            "foo:bar".to_string(),
-            "foo:baz".to_string(),
-            "foo:qux:1".to_string(),
-            "alpha".to_string(),
-            "beta:g1:h1".to_string(),
-        ];
-        app.parse_keys_to_tree();
-
-        assert!(matches!(
-            app.key_tree.get("alpha").unwrap(),
-            KeyTreeNode::Leaf { full_key_name } if full_key_name == "alpha"
-        ));
-
-        if let KeyTreeNode::Folder(foo_map) = app.key_tree.get("foo").unwrap() {
-            assert!(matches!(
-                foo_map.get("bar").unwrap(),
-                KeyTreeNode::Leaf { full_key_name } if full_key_name == "foo:bar"
-            ));
-            if let KeyTreeNode::Folder(qux_map) = foo_map.get("qux").unwrap() {
-                assert!(matches!(
-                    qux_map.get("1").unwrap(),
-                    KeyTreeNode::Leaf { full_key_name } if full_key_name == "foo:qux:1"
-                ));
-            } else {
-                panic!("qux should be a folder");
-            }
-        } else {
-            panic!("foo should be a folder");
-        }
-    }
-
-    #[test]
-    fn promotes_leaf_to_folder_when_needed() {
-        let mut app = empty_app();
-        app.raw_keys = vec!["foo".to_string(), "foo:bar".to_string()];
-        app.parse_keys_to_tree();
-        if let KeyTreeNode::Folder(map) = app.key_tree.get("foo").unwrap() {
-            assert!(matches!(
-                map.get("bar").unwrap(),
-                KeyTreeNode::Leaf { full_key_name } if full_key_name == "foo:bar"
-            ));
-            assert_eq!(map.len(), 1);
-        } else {
-            panic!("foo should be folder");
-        }
-    }
-} 
+mod tests;
