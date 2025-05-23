@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect, Alignment, Position},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear, Wrap, Gauge},
     Frame,
     text::{Line, Span},
 };
@@ -48,14 +48,27 @@ pub fn ui(f: &mut Frame, app: &App) {
         draw_clipboard_status(f, app, main_layout[3]);
     } else {
         // Normal view
-        let content_layout_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
-            .split(main_layout[1]);
+        let content_layout_chunks = if app.show_stats {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)].as_ref())
+                .split(main_layout[1])
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
+                .split(main_layout[1])
+        };
 
         draw_profiles_or_db_list(f, app, main_layout[0]);
         draw_key_list_panel(f, app, content_layout_chunks[0]);
-        draw_value_display_panel(f, app, content_layout_chunks[1]);
+        
+        if app.show_stats {
+            draw_value_display_panel(f, app, content_layout_chunks[1]);
+            draw_redis_stats_panel(f, app, content_layout_chunks[2]);
+        } else {
+            draw_value_display_panel(f, app, content_layout_chunks[1]);
+        }
         
         draw_footer_help(f, app, main_layout[2]);
         draw_clipboard_status(f, app, main_layout[3]);
@@ -260,6 +273,8 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("/: search", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
         Span::styled("d: del", Style::default().fg(Color::Yellow)),
+        Span::raw(" | "),
+        Span::styled("s: stats", Style::default().fg(Color::Yellow)),
     ];
 
     if app.search_state.is_active {
@@ -409,4 +424,154 @@ fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
     let block = Block::default().borders(Borders::ALL).title("Command Prompt (: to open, Esc to close)");
     let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
+}
+
+fn draw_redis_stats_panel(f: &mut Frame, app: &App, area: Rect) {
+    let title = if app.stats_auto_refresh {
+        "Redis Stats [Auto] (s: toggle)"
+    } else {
+        "Redis Stats [Manual] (s: toggle)"
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    if let Some(stats) = &app.redis_stats {
+        // Split the area into sections for different stat categories
+        let inner_area = block.inner(area);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(6),  // Server info
+                Constraint::Length(8),  // Memory stats
+                Constraint::Length(6),  // Client stats
+                Constraint::Length(6),  // Performance stats
+                Constraint::Min(0),     // Additional space
+            ])
+            .split(inner_area);
+
+        // Server Information Section
+        let server_info = vec![
+            Line::from(vec![
+                Span::styled("Server: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("Redis {} ({})", stats.redis_version, stats.redis_mode)),
+            ]),
+            Line::from(vec![
+                Span::styled("Role: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("{} ({} slaves)", stats.role, stats.connected_slaves)),
+            ]),
+            Line::from(vec![
+                Span::styled("Uptime: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(&stats.uptime_human),
+            ]),
+            Line::from(vec![
+                Span::styled("Updated: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("{:.1}s ago", stats.age().as_secs_f64())),
+            ]),
+        ];
+
+        let server_paragraph = Paragraph::new(server_info)
+            .block(Block::default().borders(Borders::ALL).title("Server").border_style(Style::default().fg(Color::Green)))
+            .wrap(Wrap { trim: true });
+        f.render_widget(server_paragraph, sections[0]);
+
+        // Memory Section with btop-style bars
+        let memory_usage_ratio = if stats.memory_peak > 0 {
+            (stats.memory_used as f64 / stats.memory_peak as f64).min(1.0)
+        } else {
+            0.0
+        };
+
+        let memory_gauge = Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title("Memory Usage").border_style(Style::default().fg(Color::Red)))
+            .gauge_style(Style::default().fg(Color::Red).bg(Color::Black))
+            .ratio(memory_usage_ratio)
+            .label(format!("{} / {} ({:.1}%)", 
+                stats.memory_used_human, 
+                stats.memory_peak_human,
+                memory_usage_ratio * 100.0
+            ));
+        f.render_widget(memory_gauge, sections[1]);
+
+        // Client Stats
+        let client_info = vec![
+            Line::from(vec![
+                Span::styled("Connected: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(stats.connected_clients.to_string(), Style::default().fg(Color::Green)),
+            ]),
+            Line::from(vec![
+                Span::styled("Blocked: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(stats.blocked_clients.to_string(), Style::default().fg(Color::Red)),
+            ]),
+            Line::from(vec![
+                Span::styled("Hit Rate: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:.1}%", stats.hit_rate), 
+                    if stats.hit_rate > 90.0 { Style::default().fg(Color::Green) } 
+                    else if stats.hit_rate > 70.0 { Style::default().fg(Color::Yellow) } 
+                    else { Style::default().fg(Color::Red) }
+                ),
+            ]),
+        ];
+
+        let client_paragraph = Paragraph::new(client_info)
+            .block(Block::default().borders(Borders::ALL).title("Clients").border_style(Style::default().fg(Color::Blue)))
+            .wrap(Wrap { trim: true });
+        f.render_widget(client_paragraph, sections[2]);
+
+        // Performance Stats
+        let perf_info = vec![
+            Line::from(vec![
+                Span::styled("Ops/sec: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(stats.instantaneous_ops_per_sec.to_string(), 
+                    if stats.instantaneous_ops_per_sec > 1000 { Style::default().fg(Color::Green) }
+                    else if stats.instantaneous_ops_per_sec > 100 { Style::default().fg(Color::Yellow) }
+                    else { Style::default().fg(Color::White) }
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Total Cmds: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format_large_number(stats.total_commands_processed)),
+            ]),
+            Line::from(vec![
+                Span::styled("CPU: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("sys:{:.2} usr:{:.2}", stats.used_cpu_sys, stats.used_cpu_user)),
+            ]),
+        ];
+
+        let perf_paragraph = Paragraph::new(perf_info)
+            .block(Block::default().borders(Borders::ALL).title("Performance").border_style(Style::default().fg(Color::Magenta)))
+            .wrap(Wrap { trim: true });
+        f.render_widget(perf_paragraph, sections[3]);
+
+    } else {
+        // No stats available
+        let loading_text = vec![
+            Line::from(""),
+            Line::from(Span::styled("Loading Redis stats...", Style::default().fg(Color::Yellow))).alignment(Alignment::Center),
+            Line::from(""),
+            Line::from(Span::raw("Press 's' to toggle stats view")).alignment(Alignment::Center),
+        ];
+
+        let loading_paragraph = Paragraph::new(loading_text)
+            .block(block)
+            .wrap(Wrap { trim: true });
+        f.render_widget(loading_paragraph, area);
+        return;
+    }
+
+    f.render_widget(block, area);
+}
+
+fn format_large_number(num: u64) -> String {
+    if num >= 1_000_000_000 {
+        format!("{:.1}B", num as f64 / 1_000_000_000.0)
+    } else if num >= 1_000_000 {
+        format!("{:.1}M", num as f64 / 1_000_000.0)
+    } else if num >= 1_000 {
+        format!("{:.1}K", num as f64 / 1_000.0)
+    } else {
+        num.to_string()
+    }
 }

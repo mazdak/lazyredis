@@ -240,9 +240,19 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                     app.activate_selected_filtered_key().await;
                     did_async_op = true;
                 }
+                app::PendingOperation::FetchRedisStats => {
+                    app.execute_fetch_redis_stats().await;
+                    did_async_op = true;
+                }
             }
         }
         if did_async_op {
+            continue;
+        }
+
+        // Auto-refresh stats if needed
+        if app.should_refresh_stats() {
+            app.trigger_fetch_redis_stats();
             continue;
         }
         terminal.draw(|f| ui::ui(f, &app))?;
@@ -330,6 +340,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                         app.enter_search_mode();
                                     }
                                     KeyCode::Char('p') => app.toggle_profile_selector(),
+                                    KeyCode::Char('s') => app.toggle_stats_view(),
                                     KeyCode::Tab => app.cycle_focus_forward(), 
                                     KeyCode::Char('y') => app.pending_operation = Some(app::PendingOperation::CopyKeyNameToClipboard),
                                     KeyCode::Char('Y') => app.pending_operation = Some(app::PendingOperation::CopyKeyValueToClipboard),

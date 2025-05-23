@@ -1,6 +1,7 @@
 pub mod app_clipboard;
 mod app_fetch;
 pub mod redis_client;
+pub mod redis_stats;
 pub mod value_viewer;
 pub mod state_profile_selector;
 pub mod state_delete_dialog;
@@ -18,6 +19,7 @@ pub use redis::aio::MultiplexedConnection; // Re-export for other modules
 use std::collections::HashMap;
 // use crossclip::{Clipboard, SystemClipboard}; // Moved to app_clipboard.rs
 use crate::app::redis_client::RedisClient;
+use crate::app::redis_stats::RedisStats;
 use crate::app::value_viewer::ValueViewer;
 use crate::app::state_profile_selector::ProfileSelectorState;
 use crate::app::state_delete_dialog::DeleteDialogState;
@@ -54,6 +56,7 @@ pub enum PendingOperation {
     ActivateSelectedFilteredKey,
     CopyKeyNameToClipboard,
     CopyKeyValueToClipboard,
+    FetchRedisStats,
 }
 
 pub struct App {
@@ -88,6 +91,11 @@ pub struct App {
     // Command prompt state
     pub command_state: CommandState,
     pub pending_operation: Option<PendingOperation>,
+
+    // Redis stats state
+    pub redis_stats: Option<RedisStats>,
+    pub show_stats: bool,
+    pub stats_auto_refresh: bool,
 }
 
 impl App {
@@ -129,6 +137,11 @@ impl App {
             // Command prompt state
             command_state: CommandState::new(),
             pending_operation: None,
+
+            // Redis stats state
+            redis_stats: None,
+            show_stats: false,
+            stats_auto_refresh: true,
         };
 
         if !app.profiles.is_empty() {
@@ -759,6 +772,45 @@ impl App {
 
     pub async fn execute_command_input(&mut self) {
         self.command_state.execute_command(&mut self.redis.connection).await;
+    }
+
+    pub fn toggle_stats_view(&mut self) {
+        self.show_stats = !self.show_stats;
+        if self.show_stats && self.redis_stats.is_none() {
+            self.pending_operation = Some(PendingOperation::FetchRedisStats);
+        }
+    }
+
+    pub fn toggle_stats_auto_refresh(&mut self) {
+        self.stats_auto_refresh = !self.stats_auto_refresh;
+    }
+
+    pub fn trigger_fetch_redis_stats(&mut self) {
+        self.pending_operation = Some(PendingOperation::FetchRedisStats);
+    }
+
+    pub async fn execute_fetch_redis_stats(&mut self) {
+        match self.redis.get_info().await {
+            Ok(info_string) => {
+                self.redis_stats = Some(RedisStats::from_info_string(&info_string));
+            }
+            Err(e) => {
+                // Could set an error state here if needed
+                eprintln!("Failed to fetch Redis stats: {}", e);
+            }
+        }
+        self.pending_operation = None;
+    }
+
+    pub fn should_refresh_stats(&self) -> bool {
+        if !self.show_stats || !self.stats_auto_refresh {
+            return false;
+        }
+        
+        match &self.redis_stats {
+            None => true,
+            Some(stats) => stats.is_stale(std::time::Duration::from_secs(2)),
+        }
     }
 }
 

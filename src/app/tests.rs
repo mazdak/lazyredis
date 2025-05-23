@@ -37,6 +37,9 @@ mod tests {
             delete_dialog: DeleteDialogState::default(),
             command_state: CommandState::new(),
             pending_operation: None,
+            redis_stats: None,
+            show_stats: false,
+            stats_auto_refresh: true,
         }
     }
 

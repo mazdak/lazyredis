@@ -212,7 +212,20 @@ impl RedisClient {
             Ok(value)
         } else {
             Err(RedisError::Connection(
-                "No Redis connection available for GET.".to_string(),
+                "No Redis connection available for getting string.".to_string(),
+            ))
+        }
+    }
+
+    pub async fn get_info(&mut self) -> Result<String, RedisError> {
+        if let Some(mut con) = self.connection.clone() {
+            let info = redis::cmd("INFO")
+                .query_async::<String>(&mut con)
+                .await?;
+            Ok(info)
+        } else {
+            Err(RedisError::Connection(
+                "No Redis connection available for INFO command.".to_string(),
             ))
         }
     }
