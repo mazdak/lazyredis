@@ -184,7 +184,20 @@ fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
     } else {
         app.visible_keys_in_current_view
             .iter()
-            .map(|(name, _is_folder)| ListItem::new(name.as_str()))
+            .enumerate()
+            .map(|(index, (name, _is_folder))| {
+                let display_name = if app.selected_indices.contains(&index) {
+                    format!("● {}", name)
+                } else {
+                    name.clone()
+                };
+                let item = ListItem::new(display_name);
+                if app.selected_indices.contains(&index) {
+                    item.style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                } else {
+                    item
+                }
+            })
             .collect()
     };
     let selected_key_index = if app.search_state.is_active {

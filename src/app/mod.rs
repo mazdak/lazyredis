@@ -57,6 +57,7 @@ pub enum PendingOperation {
     CopyKeyNameToClipboard,
     CopyKeyValueToClipboard,
     FetchRedisStats,
+    AutoPreviewCurrentKey,
 }
 
 pub struct App {
@@ -74,10 +75,13 @@ pub struct App {
     pub ttl_map: HashMap<String, i64>,
     pub type_map: HashMap<String, String>,
     pub selected_visible_key_index: usize,
+    pub selected_indices: std::collections::HashSet<usize>,
+    pub multi_select_anchor: Option<usize>,
     pub key_delimiter: char,
     pub is_key_view_focused: bool,
     pub value_viewer: ValueViewer,
     pub is_value_view_focused: bool,
+    pub value_is_pinned: bool,
     pub scan_cursor: u64,
     pub keys_fully_loaded: bool,
     pub clipboard_status: Option<String>,
@@ -120,10 +124,13 @@ impl App {
             ttl_map: HashMap::new(),
             type_map: HashMap::new(),
             selected_visible_key_index: 0,
+            selected_indices: std::collections::HashSet::new(),
+            multi_select_anchor: None,
             key_delimiter: ':',
             is_key_view_focused: false, 
             value_viewer: ValueViewer::default(),
             is_value_view_focused: false,
+            value_is_pinned: false,
             scan_cursor: 0,
             keys_fully_loaded: false,
             clipboard_status: None,
@@ -201,6 +208,14 @@ impl App {
     pub fn clear_selected_key_info(&mut self) {
         self.value_viewer.clear();
         self.is_value_view_focused = false;
+        self.value_is_pinned = false;
+    }
+
+    pub fn clear_selected_key_info_if_not_pinned(&mut self) {
+        if !self.value_is_pinned {
+            self.value_viewer.clear();
+            self.is_value_view_focused = false;
+        }
     }
 
     async fn fetch_keys_and_build_tree(&mut self) {
@@ -315,7 +330,7 @@ impl App {
             };
             if new_idx != self.selected_visible_key_index {
                 self.selected_visible_key_index = new_idx;
-                self.clear_selected_key_info(); 
+                self.clear_selected_key_info_if_not_pinned();
             }
         }
     }
@@ -427,6 +442,10 @@ impl App {
             }
         }
         self.value_viewer.update_current_display_value();
+        // Mark value as pinned when explicitly activated with Enter
+        if self.value_viewer.active_leaf_key_name.is_some() {
+            self.value_is_pinned = true;
+        }
     }
 
     pub fn navigate_key_tree_up(&mut self) {
@@ -520,7 +539,147 @@ impl App {
             let new_idx = (self.selected_visible_key_index + 1) % self.visible_keys_in_current_view.len();
             if new_idx != self.selected_visible_key_index { 
                 self.selected_visible_key_index = new_idx;
-                self.clear_selected_key_info(); 
+                self.clear_selected_key_info_if_not_pinned();
+            }
+        }
+    }
+
+    pub fn next_key_in_view_with_shift(&mut self) {
+        if !self.visible_keys_in_current_view.is_empty() {
+            let anchor = self.multi_select_anchor.unwrap_or(self.selected_visible_key_index);
+            let new_idx = (self.selected_visible_key_index + 1) % self.visible_keys_in_current_view.len();
+            
+            if new_idx != self.selected_visible_key_index {
+                self.selected_visible_key_index = new_idx;
+                self.multi_select_anchor = Some(anchor);
+                self.update_selection_range(anchor, new_idx);
+                self.clear_selected_key_info_if_not_pinned();
+            }
+        }
+    }
+
+    pub fn previous_key_in_view_with_shift(&mut self) {
+        if !self.visible_keys_in_current_view.is_empty() {
+            let anchor = self.multi_select_anchor.unwrap_or(self.selected_visible_key_index);
+            let new_idx = if self.selected_visible_key_index > 0 {
+                self.selected_visible_key_index - 1
+            } else {
+                self.visible_keys_in_current_view.len() - 1
+            };
+            
+            if new_idx != self.selected_visible_key_index {
+                self.selected_visible_key_index = new_idx;
+                self.multi_select_anchor = Some(anchor);
+                self.update_selection_range(anchor, new_idx);
+                self.clear_selected_key_info_if_not_pinned();
+            }
+        }
+    }
+
+    fn update_selection_range(&mut self, anchor: usize, current: usize) {
+        self.selected_indices.clear();
+        let start = anchor.min(current);
+        let end = anchor.max(current);
+        for i in start..=end {
+            self.selected_indices.insert(i);
+        }
+    }
+
+    pub fn clear_multi_selection(&mut self) {
+        self.selected_indices.clear();
+        self.multi_select_anchor = None;
+    }
+
+    pub fn toggle_current_selection(&mut self) {
+        if self.selected_indices.contains(&self.selected_visible_key_index) {
+            self.selected_indices.remove(&self.selected_visible_key_index);
+        } else {
+            self.selected_indices.insert(self.selected_visible_key_index);
+        }
+        self.multi_select_anchor = Some(self.selected_visible_key_index);
+    }
+
+    pub async fn auto_preview_current_key(&mut self) {
+        if !self.value_is_pinned && self.selected_visible_key_index < self.visible_keys_in_current_view.len() {
+            let (display_name, is_folder) = self.visible_keys_in_current_view[self.selected_visible_key_index].clone();
+            
+            if !is_folder {
+                let mut current_node_map_for_leaf = &self.key_tree;
+                for segment in &self.current_breadcrumb {
+                    if let Some(KeyTreeNode::Folder(sub_map)) = current_node_map_for_leaf.get(segment) {
+                        current_node_map_for_leaf = sub_map;
+                    } else {
+                        return;
+                    }
+                }
+                
+                let actual_full_key_name_opt: Option<String> = current_node_map_for_leaf
+                    .get(&display_name)
+                    .and_then(|node| match node {
+                        KeyTreeNode::Leaf { full_key_name } => Some(full_key_name.clone()),
+                        _ => None,
+                    });
+                    
+                if let Some(actual_full_key_name) = actual_full_key_name_opt {
+                    self.value_viewer.active_leaf_key_name = Some(actual_full_key_name.clone());
+                    self.value_viewer.selected_key_type = Some("fetching...".to_string());
+                    self.value_viewer.selected_value_sub_index = 0;
+                    self.value_viewer.value_view_scroll = (0, 0);
+                    
+                    let mut con = match self.redis.connection.take() {
+                        Some(con) => con,
+                        None => return,
+                    };
+                    
+                    // Fetch TTL and type for the selected key only
+                    let ttl = redis::cmd("TTL").arg(&actual_full_key_name).query_async::<i64>(&mut con).await.unwrap_or(-2);
+                    self.ttl_map.insert(actual_full_key_name.clone(), ttl);
+                    let key_type = redis::cmd("TYPE").arg(&actual_full_key_name).query_async::<String>(&mut con).await.unwrap_or("unknown".to_string());
+                    self.type_map.insert(actual_full_key_name.clone(), key_type.clone());
+                    
+                    match redis::cmd("GET").arg(&actual_full_key_name).query_async::<Option<String>>(&mut con).await {
+                        Ok(Some(value)) => {
+                            self.value_viewer.selected_key_type = Some("string".to_string());
+                            self.value_viewer.selected_key_value = Some(value);
+                        }
+                        Ok(None) => {
+                            self.value_viewer.selected_key_type = Some("empty".to_string());
+                            self.value_viewer.selected_key_value = Some("(empty)".to_string());
+                        }
+                        Err(e) => {
+                            let error_msg = e;
+                            if error_msg.to_string().contains("WRONGTYPE") {
+                                match key_type.as_str() {
+                                    "hash" => {
+                                        self.fetch_and_set_hash_value(&actual_full_key_name, &mut con).await;
+                                    }
+                                    "zset" => {
+                                        self.fetch_and_set_zset_value(&actual_full_key_name, &mut con).await;
+                                    }
+                                    "list" => {
+                                        self.fetch_and_set_list_value(&actual_full_key_name, &mut con).await;
+                                    }
+                                    "set" => {
+                                        self.fetch_and_set_set_value(&actual_full_key_name, &mut con).await;
+                                    }
+                                    "stream" => {
+                                        self.fetch_and_set_stream_value(&actual_full_key_name, &mut con).await;
+                                    }
+                                    _ => {
+                                        self.value_viewer.selected_key_type = Some("unknown".to_string());
+                                        self.value_viewer.selected_key_value = Some("Unknown key type".to_string());
+                                    }
+                                }
+                            } else {
+                                self.value_viewer.selected_key_type = Some("error".to_string());
+                                self.value_viewer.selected_key_value = Some(format!("Error fetching value: {}", error_msg));
+                            }
+                        }
+                    }
+                    
+                    self.redis.connection = Some(con);
+                    self.value_viewer.update_current_display_value();
+                }
             }
         }
     }
@@ -564,13 +723,25 @@ impl App {
     }
 
     pub fn initiate_delete_selected_item(&mut self) {
-        self.delete_dialog.initiate_delete_selected_item(
-            self.selected_visible_key_index,
-            &self.visible_keys_in_current_view,
-            &self.current_breadcrumb,
-            self.key_delimiter,
-            self.search_state.is_active,
-        );
+        if !self.selected_indices.is_empty() {
+            // Multi-select delete
+            self.delete_dialog.initiate_delete_multiple_items(
+                &self.selected_indices,
+                &self.visible_keys_in_current_view,
+                &self.current_breadcrumb,
+                self.key_delimiter,
+                self.search_state.is_active,
+            );
+        } else {
+            // Single item delete
+            self.delete_dialog.initiate_delete_selected_item(
+                self.selected_visible_key_index,
+                &self.visible_keys_in_current_view,
+                &self.current_breadcrumb,
+                self.key_delimiter,
+                self.search_state.is_active,
+            );
+        }
     }
 
     pub fn cancel_delete_item(&mut self) {
@@ -582,7 +753,9 @@ impl App {
     }
 
     pub async fn confirm_delete_item(&mut self) {
-        let result = if self.delete_dialog.deletion_is_folder {
+        let result = if self.delete_dialog.is_multi_delete {
+            self.delete_multiple_items_async().await
+        } else if self.delete_dialog.deletion_is_folder {
             if let Some(prefix) = self.delete_dialog.prefix_to_delete.clone() {
                 self.delete_redis_prefix_async(&prefix).await
             } else {
@@ -606,6 +779,11 @@ impl App {
         self.delete_dialog.key_to_delete_full_path = None;
         self.delete_dialog.prefix_to_delete = None;
         self.delete_dialog.deletion_is_folder = false;
+        self.delete_dialog.keys_to_delete.clear();
+        self.delete_dialog.is_multi_delete = false;
+
+        // Clear multi-selection after deletion
+        self.clear_multi_selection();
 
         self.fetch_keys_and_build_tree().await;
         self.update_visible_keys(); 
@@ -621,30 +799,36 @@ impl App {
             Some(con) => con,
             None => return Err("No Redis connection available for deleting prefix.".to_string()),
         };
-        loop {
-            match redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH").arg(&pattern)
-                .arg("COUNT").arg(100)
-                .query_async::<(u64, Vec<String>)>(&mut con).await
-            {
-                Ok((next_cursor, batch)) => {
-                    keys_to_delete.extend(batch);
-                    if next_cursor == 0 {
-                        break;
+        
+        let result = async {
+            loop {
+                match redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH").arg(&pattern)
+                    .arg("COUNT").arg(100)
+                    .query_async::<(u64, Vec<String>)>(&mut con).await
+                {
+                    Ok((next_cursor, batch)) => {
+                        keys_to_delete.extend(batch);
+                        if next_cursor == 0 {
+                            break;
+                        }
+                        cursor = next_cursor;
                     }
-                    cursor = next_cursor;
+                    Err(e) => return Err(format!("Error scanning keys for prefix {}: {}", prefix, e)),
                 }
-                Err(e) => return Err(format!("Error scanning keys for prefix {}: {}", prefix, e.to_string())),
             }
-        }
-        if keys_to_delete.is_empty() {
-            return Ok(format!("No keys found matching prefix '{}'.", prefix));
-        }
-        match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query_async::<i32>(&mut con).await {
-            Ok(count) => Ok(format!("Deleted {} keys matching prefix '{}'.", count, prefix)),
-            Err(e) => Err(format!("Error deleting keys for prefix {}: {}", prefix, e.to_string())),
-        }
+            if keys_to_delete.is_empty() {
+                return Ok(format!("No keys found matching prefix '{}'.", prefix));
+            }
+            match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query_async::<i32>(&mut con).await {
+                Ok(count) => Ok(format!("Deleted {} keys matching prefix '{}'.", count, prefix)),
+                Err(e) => Err(format!("Error deleting keys for prefix {}: {}", prefix, e)),
+            }
+        }.await;
+        
+        self.redis.connection = Some(con);
+        result
     }
 
     async fn delete_redis_key_async(&mut self, full_key: &str) -> Result<String, String> {
@@ -652,7 +836,8 @@ impl App {
             Some(con) => con,
             None => return Err("No Redis connection available for deleting key.".to_string()),
         };
-        match redis::cmd("DEL").arg(full_key).query_async::<i32>(&mut con).await {
+        
+        let result = match redis::cmd("DEL").arg(full_key).query_async::<i32>(&mut con).await {
             Ok(count) => {
                 if count > 0 {
                     Ok(format!("Deleted key '{}'.", full_key))
@@ -660,7 +845,73 @@ impl App {
                     Ok(format!("Key '{}' not found or already deleted.", full_key))
                 }
             }
-            Err(e) => Err(format!("Error deleting key {}: {}", full_key, e.to_string())),
+            Err(e) => Err(format!("Error deleting key {}: {}", full_key, e)),
+        };
+        
+        self.redis.connection = Some(con);
+        result
+    }
+
+    async fn delete_multiple_items_async(&mut self) -> Result<String, String> {
+        let mut con = match self.redis.connection.take() {
+            Some(con) => con,
+            None => return Err("No Redis connection available for multi-delete.".to_string()),
+        };
+        
+        let mut total_deleted = 0;
+        let mut errors = Vec::new();
+        
+        for item in &self.delete_dialog.keys_to_delete {
+            if item.starts_with("folder:") {
+                // Handle folder deletion
+                let prefix = &item[7..]; // Remove "folder:" prefix
+                let pattern = format!("{}{}", prefix, if prefix.ends_with(self.key_delimiter) { "*" } else { "*" });
+                let mut keys_to_delete: Vec<String> = Vec::new();
+                let mut cursor: u64 = 0;
+                
+                // Scan for keys matching the folder pattern
+                loop {
+                    match redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH").arg(&pattern)
+                        .arg("COUNT").arg(100)
+                        .query_async::<(u64, Vec<String>)>(&mut con).await
+                    {
+                        Ok((next_cursor, batch)) => {
+                            keys_to_delete.extend(batch);
+                            if next_cursor == 0 {
+                                break;
+                            }
+                            cursor = next_cursor;
+                        }
+                        Err(e) => {
+                            errors.push(format!("Error scanning keys for folder {}: {}", prefix, e));
+                            break;
+                        }
+                    }
+                }
+                
+                if !keys_to_delete.is_empty() {
+                    match redis::cmd("DEL").arg(keys_to_delete.as_slice()).query_async::<i32>(&mut con).await {
+                        Ok(count) => total_deleted += count,
+                        Err(e) => errors.push(format!("Error deleting keys for folder {}: {}", prefix, e)),
+                    }
+                }
+            } else {
+                // Handle single key deletion
+                match redis::cmd("DEL").arg(item).query_async::<i32>(&mut con).await {
+                    Ok(count) => total_deleted += count,
+                    Err(e) => errors.push(format!("Error deleting key {}: {}", item, e)),
+                }
+            }
+        }
+        
+        self.redis.connection = Some(con);
+        
+        if errors.is_empty() {
+            Ok(format!("Deleted {} items.", total_deleted))
+        } else {
+            Err(format!("Deleted {} items, but encountered errors: {}", total_deleted, errors.join("; ")))
         }
     }
 
@@ -698,7 +949,7 @@ impl App {
             if info.is_folder {
                 self.current_breadcrumb = info.path_segments;
                 self.update_visible_keys();
-                self.clear_selected_key_info();
+                self.clear_selected_key_info_if_not_pinned();
             } else {
                 self.current_breadcrumb = if info.path_segments.len() > 1 {
                     info.path_segments[0..info.path_segments.len()-1].to_vec()
@@ -712,10 +963,10 @@ impl App {
                         self.selected_visible_key_index = idx;
                         self.activate_selected_key().await; 
                     } else {
-                        self.clear_selected_key_info();
+                        self.clear_selected_key_info_if_not_pinned();
                     }
                 } else {
-                    self.clear_selected_key_info();
+                    self.clear_selected_key_info_if_not_pinned();
                 }
             }
             self.search_state.exit();

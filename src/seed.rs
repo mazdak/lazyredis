@@ -18,7 +18,7 @@ pub async fn seed_redis_data(redis_url: &str, db_index: u8) -> Result<()> {
     for i in 0..1000 {
         let _: () = con.set(format!("seed:simple:{}", i), format!("Simple value {}", i)).await?;
     }
-    if 1000 % 100 == 0 { println!("Seeded 1000 simple keys...");}
+    println!("Seeded 1000 simple keys...");
 
     for i in 0..50 {
         for j in 0..20 {

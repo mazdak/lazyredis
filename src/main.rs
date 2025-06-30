@@ -19,7 +19,6 @@ use anyhow::Result;
 use clap::Parser;
 use redis::Client;
 use url::Url;
-use tokio;
 
 /// A simple TUI for Redis
 #[derive(Parser, Debug)]
@@ -244,6 +243,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                     app.execute_fetch_redis_stats().await;
                     did_async_op = true;
                 }
+                app::PendingOperation::AutoPreviewCurrentKey => {
+                    app.auto_preview_current_key().await;
+                    did_async_op = true;
+                }
             }
         }
         if did_async_op {
@@ -354,19 +357,29 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                         terminal.show_cursor()?;
                                     }
                                     KeyCode::Char('j') | KeyCode::Down => {
-                                        if app.is_value_view_focused {
+                                        if key.modifiers == crossterm::event::KeyModifiers::SHIFT {
+                                            if app.is_key_view_focused {
+                                                app.next_key_in_view_with_shift();
+                                            }
+                                        } else if app.is_value_view_focused {
                                             app.select_next_value_item();
                                         } else if app.is_key_view_focused {
                                             app.next_key_in_view();
+                                            app.pending_operation = Some(app::PendingOperation::AutoPreviewCurrentKey);
                                         } else {
                                             app.next_db();
                                         }
                                     }
                                     KeyCode::Char('k') | KeyCode::Up => {
-                                        if app.is_value_view_focused {
+                                        if key.modifiers == crossterm::event::KeyModifiers::SHIFT {
+                                            if app.is_key_view_focused {
+                                                app.previous_key_in_view_with_shift();
+                                            }
+                                        } else if app.is_value_view_focused {
                                             app.select_previous_value_item();
                                         } else if app.is_key_view_focused {
                                             app.previous_key_in_view();
+                                            app.pending_operation = Some(app::PendingOperation::AutoPreviewCurrentKey);
                                         } else {
                                             app.previous_db();
                                         }
@@ -400,7 +413,16 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                     }
                                     KeyCode::Esc => {
                                         if app.is_key_view_focused {
-                                            app.navigate_to_key_tree_root();
+                                            if !app.selected_indices.is_empty() {
+                                                app.clear_multi_selection();
+                                            } else {
+                                                app.navigate_to_key_tree_root();
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Char(' ') => {
+                                        if key.modifiers == crossterm::event::KeyModifiers::CONTROL && app.is_key_view_focused {
+                                            app.toggle_current_selection();
                                         }
                                     }
                                     _ => {}
