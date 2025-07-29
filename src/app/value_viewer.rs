@@ -142,7 +142,7 @@ impl ValueViewer {
                     self.current_display_value = self.selected_key_value.clone();
                 }
             }
-            Some("REJSON-RL") => self.current_display_value = self.selected_key_value_json.clone(),
+            Some("REJSON-RL") => self.current_display_value = self.selected_key_value_json.take(),
             _ => self.current_display_value = self.selected_key_value.clone(),
         }
     }

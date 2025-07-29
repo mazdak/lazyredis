@@ -180,7 +180,7 @@ impl App {
                 app.value_viewer.selected_key_value_json = Some(value);
             },
             |app| {
-                app.value_viewer.selected_key_value_set = None;
+                app.value_viewer.selected_key_value_json = None;
             },
             err_context,
         )
