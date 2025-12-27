@@ -153,15 +153,18 @@ fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn format_ttl(ttl: i64) -> String {
-    if ttl < 0 {
-        "No Expiry".to_string()
-    } else {
-        let mins = ttl / 60;
-        let secs = ttl % 60;
-        if mins > 0 {
-            format!("Expires in {}m {}s", mins, secs)
-        } else {
-            format!("Expires in {}s", secs)
+    match ttl {
+        -2 => "Key missing".to_string(),
+        -1 => "No Expiry".to_string(),
+        ttl if ttl < 0 => "Unknown TTL".to_string(),
+        _ => {
+            let mins = ttl / 60;
+            let secs = ttl % 60;
+            if mins > 0 {
+                format!("Expires in {}m {}s", mins, secs)
+            } else {
+                format!("Expires in {}s", secs)
+            }
         }
     }
 }
@@ -414,7 +417,9 @@ fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
     let input_line_text = format!("CMD> {}", app.command_state.input_buffer);
     // Calculate cursor position: area.x + "CMD> ".len() + current command_input length
     // Ensure cursor position is within the bounds of the modal.
-    let cursor_x = area.x + 6 + app.command_state.input_buffer.chars().count() as u16;
+    let raw_cursor_x = area.x + 6 + app.command_state.input_buffer.chars().count() as u16;
+    let max_cursor_x = area.x + area.width.saturating_sub(1);
+    let cursor_x = raw_cursor_x.min(max_cursor_x);
     let cursor_y = area.y + 3; // Corrected: Was area.y + 4, should be on the input line
 
     // Only set cursor if the command prompt is active and focused (implicitly handled by modal display)
@@ -586,5 +591,25 @@ fn format_large_number(num: u64) -> String {
         format!("{:.1}K", num as f64 / 1_000.0)
     } else {
         num.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_ttl;
+
+    #[test]
+    fn format_ttl_handles_missing() {
+        assert_eq!(format_ttl(-2), "Key missing");
+    }
+
+    #[test]
+    fn format_ttl_handles_no_expiry() {
+        assert_eq!(format_ttl(-1), "No Expiry");
+    }
+
+    #[test]
+    fn format_ttl_handles_positive() {
+        assert_eq!(format_ttl(75), "Expires in 1m 15s");
     }
 }

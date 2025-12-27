@@ -117,14 +117,19 @@ impl Config {
                 let default_cfg = Self::default_config();
                 match toml::to_string_pretty(&default_cfg) {
                     Ok(toml_string) => {
-                        if let Err(e) = fs::create_dir_all(&config_dir) {
+                        if let Err(e) = fs::create_dir_all(config_dir) {
                             eprintln!("Failed to create config directory '{}': {}", config_dir.display(), e);
+                        } else if let Err(e) = fs::write(&config_file_path, toml_string) {
+                            eprintln!(
+                                "Failed to write default config file to '{}': {}",
+                                config_file_path.display(),
+                                e
+                            );
                         } else {
-                            if let Err(e) = fs::write(&config_file_path, toml_string) {
-                                eprintln!("Failed to write default config file to '{}': {}", config_file_path.display(), e);
-                            } else {
-                                eprintln!("Default config file created at '{}'", config_file_path.display());
-                            }
+                            eprintln!(
+                                "Default config file created at '{}'",
+                                config_file_path.display()
+                            );
                         }
                     }
                     Err(e) => {

@@ -121,9 +121,13 @@ impl RedisClient {
         }
     }
 
-    pub async fn delete_prefix(&mut self, prefix: &str, delimiter: char) -> Result<usize, RedisError> {
-        if let Some(mut con) = self.connection.clone() {
-            let pattern = format!("{}{}", prefix, if prefix.ends_with(delimiter) { "*" } else { "*" });
+    pub async fn delete_prefix(
+        &mut self,
+        prefix: &str,
+        _delimiter: char,
+    ) -> Result<usize, RedisError> {
+        if let Some(con) = self.connection.as_mut() {
+            let pattern = format!("{}*", prefix);
             let mut keys_to_delete: Vec<String> = Vec::new();
             let mut cursor: u64 = 0;
             loop {
@@ -133,7 +137,7 @@ impl RedisClient {
                     .arg(&pattern)
                     .arg("COUNT")
                     .arg(100)
-                    .query_async::<(u64, Vec<String>)>(&mut con)
+                    .query_async::<(u64, Vec<String>)>(con)
                     .await
                 {
                     Ok((next_cursor, batch)) => {
@@ -151,7 +155,7 @@ impl RedisClient {
             }
             let count = redis::cmd("DEL")
                 .arg(keys_to_delete.as_slice())
-                .query_async::<i32>(&mut con)
+                .query_async::<i32>(con)
                 .await?;
             Ok(count as usize)
         } else {
@@ -162,10 +166,10 @@ impl RedisClient {
     }
 
     pub async fn delete_key(&mut self, key: &str) -> Result<bool, RedisError> {
-        if let Some(mut con) = self.connection.clone() {
+        if let Some(con) = self.connection.as_mut() {
             let count = redis::cmd("DEL")
                 .arg(key)
-                .query_async::<i32>(&mut con)
+                .query_async::<i32>(con)
                 .await?;
             Ok(count > 0)
         } else {
@@ -176,10 +180,10 @@ impl RedisClient {
     }
 
     pub async fn get_key_type(&mut self, key: &str) -> Result<String, RedisError> {
-        if let Some(mut con) = self.connection.clone() {
+        if let Some(con) = self.connection.as_mut() {
             let key_type = redis::cmd("TYPE")
                 .arg(key)
-                .query_async::<String>(&mut con)
+                .query_async::<String>(con)
                 .await?;
             Ok(key_type)
         } else {
@@ -190,10 +194,10 @@ impl RedisClient {
     }
 
     pub async fn get_ttl(&mut self, key: &str) -> Result<i64, RedisError> {
-        if let Some(mut con) = self.connection.clone() {
+        if let Some(con) = self.connection.as_mut() {
             let ttl = redis::cmd("TTL")
                 .arg(key)
-                .query_async::<i64>(&mut con)
+                .query_async::<i64>(con)
                 .await?;
             Ok(ttl)
         } else {
@@ -204,10 +208,10 @@ impl RedisClient {
     }
 
     pub async fn get_string(&mut self, key: &str) -> Result<Option<String>, RedisError> {
-        if let Some(mut con) = self.connection.clone() {
+        if let Some(con) = self.connection.as_mut() {
             let value = redis::cmd("GET")
                 .arg(key)
-                .query_async::<Option<String>>(&mut con)
+                .query_async::<Option<String>>(con)
                 .await?;
             Ok(value)
         } else {
@@ -218,10 +222,8 @@ impl RedisClient {
     }
 
     pub async fn get_info(&mut self) -> Result<String, RedisError> {
-        if let Some(mut con) = self.connection.clone() {
-            let info = redis::cmd("INFO")
-                .query_async::<String>(&mut con)
-                .await?;
+        if let Some(con) = self.connection.as_mut() {
+            let info = redis::cmd("INFO").query_async::<String>(con).await?;
             Ok(info)
         } else {
             Err(RedisError::Connection(
@@ -231,4 +233,10 @@ impl RedisClient {
     }
 
     // Add more methods for hash, list, set, zset, stream as needed
-} 
+}
+
+impl Default for RedisClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}

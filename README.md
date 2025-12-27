@@ -9,11 +9,12 @@ delete keys or whole key prefixes, and seed a Redis instance with sample data fo
 ## Key Features
 
 - **Interactive key tree view:** browse keys grouped by delimiter (default `:`) in a folder-like hierarchy.
-- **Multi-type value inspector:** view and navigate string, hash, list, set, sorted set (zset), and stream entries.
+- **Multi-type value inspector:** view and navigate string, hash, list, set, sorted set (zset), stream, and JSON values.
+- **Binary-safe display:** UTF-8 text when possible; hex rendering for non-UTF8 values.
 - **Fuzzy search:** quickly find keys across the current view using fuzzy matching.
 - **Profile & DB management:** switch between multiple connection profiles and Redis databases (select via `p`).
 - **Copy to clipboard:** copy key names or values directly to the system clipboard (`y` / `Y`).
-- **Delete keys or prefixes:** delete individual keys or entire key folders (with confirmation).
+- **Delete keys or prefixes:** delete individual keys or entire key folders (with confirmation, batched UNLINK where available).
 - **Pagination & navigation:** navigate values with arrow keys, page up/down, and Tab for focus switching.
 - **Seeding test data:** populate a development Redis instance with a large variety of sample keys via `--seed`.
 
@@ -172,7 +173,13 @@ Both commands will only target profiles marked as `dev = true` in your configura
 
 This generates (only for `--seed`):
 
-- Simple string keys, nested hierarchies, paths, hashes, lists, sets, sorted sets, streams, and empty types.
+- Simple string keys, nested hierarchies, paths, hashes, lists, sets, sorted sets, streams, JSON-compatible values, and empty types.
+
+## Value Rendering Notes
+
+- **Strings & Binary:** Values are shown as UTF-8 when possible. Non-UTF8 bytes are rendered as hex.
+- **JSON:** JSON values (RedisJSON module) are pretty-printed when valid JSON.
+- **Streams:** The viewer shows the latest 100 entries using a read-only range query (no consumer groups are created).
 
 ## Contributing
 

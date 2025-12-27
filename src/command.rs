@@ -57,4 +57,10 @@ impl CommandState {
             self.last_result = Some("Not connected".to_string());
         }
     }
-} 
+}
+
+impl Default for CommandState {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -1,5 +1,6 @@
 pub mod app_clipboard;
 mod app_fetch;
+mod value_format;
 pub mod redis_client;
 pub mod redis_stats;
 pub mod state_delete_dialog;
@@ -59,6 +60,8 @@ pub enum PendingOperation {
     FetchRedisStats,
     AutoPreviewCurrentKey,
 }
+
+const DELETE_BATCH_SIZE: usize = 500;
 
 pub struct App {
     pub selected_db_index: usize,
@@ -173,7 +176,7 @@ impl App {
     }
 
     pub fn trigger_initial_connect(&mut self) {
-        self.connection_status = format!("Preparing initial connection...");
+        self.connection_status = "Preparing initial connection...".to_string();
         self.pending_operation = Some(PendingOperation::InitialConnect);
     }
 
@@ -231,6 +234,103 @@ impl App {
         }
     }
 
+    async fn fetch_value_for_key(
+        &mut self,
+        full_key_name: &str,
+        con: &mut MultiplexedConnection,
+    ) {
+        let ttl = redis::cmd("TTL")
+            .arg(full_key_name)
+            .query_async::<i64>(con)
+            .await
+            .unwrap_or(-2);
+        self.ttl_map.insert(full_key_name.to_string(), ttl);
+
+        let key_type = match redis::cmd("TYPE")
+            .arg(full_key_name)
+            .query_async::<String>(con)
+            .await
+        {
+            Ok(key_type) => key_type,
+            Err(e) => {
+                self.value_viewer.selected_key_type = Some("error".to_string());
+                self.value_viewer.selected_key_value = Some(format!(
+                    "Failed to TYPE key '{}': {}",
+                    full_key_name, e
+                ));
+                self.value_viewer.update_current_display_value();
+                return;
+            }
+        };
+
+        self.type_map
+            .insert(full_key_name.to_string(), key_type.clone());
+        let key_type_upper = key_type.to_uppercase();
+        self.value_viewer.selected_key_type = Some(key_type_upper.clone());
+
+        match key_type_upper.as_str() {
+            "STRING" => self.fetch_string_value(full_key_name, con).await,
+            "NONE" => {
+                self.value_viewer.selected_key_value =
+                    Some("(nil)".to_string());
+            }
+            "HASH" => {
+                self.fetch_and_set_hash_value(full_key_name, con).await;
+            }
+            "ZSET" => {
+                self.fetch_and_set_zset_value(full_key_name, con).await;
+            }
+            "LIST" => {
+                self.fetch_and_set_list_value(full_key_name, con).await;
+            }
+            "SET" => {
+                self.fetch_and_set_set_value(full_key_name, con).await;
+            }
+            "STREAM" => {
+                self.fetch_and_set_stream_value(full_key_name, con).await;
+            }
+            "REJSON-RL" | "JSON" => {
+                self.fetch_and_set_json_value(full_key_name, con).await;
+            }
+            _ => {
+                self.value_viewer.selected_key_value = Some(format!(
+                    "Key is of type '{}'. Value view for this type not yet implemented.",
+                    key_type
+                ));
+            }
+        }
+
+        self.value_viewer.update_current_display_value();
+    }
+
+    async fn fetch_string_value(
+        &mut self,
+        full_key_name: &str,
+        con: &mut MultiplexedConnection,
+    ) {
+        match redis::cmd("GET")
+            .arg(full_key_name)
+            .query_async::<Option<Vec<u8>>>(con)
+            .await
+        {
+            Ok(Some(bytes)) => {
+                self.value_viewer.selected_key_value =
+                    Some(value_format::format_bytes_block(&bytes));
+            }
+            Ok(None) => {
+                self.value_viewer.selected_key_value =
+                    Some("(nil)".to_string());
+            }
+            Err(e) => {
+                self.value_viewer.selected_key_type = Some("error".to_string());
+                self.value_viewer.selected_key_value = Some(format!(
+                    "Failed to GET key '{}': {}",
+                    full_key_name, e
+                ));
+            }
+        }
+    }
+
     async fn fetch_keys_and_build_tree(&mut self) {
         self.raw_keys.clear();
         self.key_tree.clear();
@@ -262,9 +362,11 @@ impl App {
             {
                 Ok((next_cursor, batch)) => {
                     cursor = next_cursor;
+                    for key in &batch {
+                        self.insert_key_into_tree(key);
+                    }
                     self.raw_keys.extend(batch);
                     if !self.raw_keys.is_empty() {
-                        self.parse_keys_to_tree();
                         self.update_visible_keys();
                     }
                     self.connection_status = format!(
@@ -306,38 +408,43 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     fn parse_keys_to_tree(&mut self) {
-        let mut tree = HashMap::new();
-        for full_key_name in &self.raw_keys {
-            let parts: Vec<&str> = full_key_name.split(self.key_delimiter).collect();
-            let mut current_level = &mut tree;
-            for (i, part) in parts.iter().enumerate() {
-                if i == parts.len() - 1 {
-                    current_level
-                        .entry(part.to_string())
-                        .or_insert_with(|| KeyTreeNode::Leaf {
-                            full_key_name: full_key_name.to_string(),
-                        });
+        self.key_tree.clear();
+        let raw_keys = self.raw_keys.clone();
+        for full_key_name in &raw_keys {
+            self.insert_key_into_tree(full_key_name);
+        }
+    }
+
+    fn insert_key_into_tree(&mut self, full_key_name: &str) {
+        let parts: Vec<&str> = full_key_name.split(self.key_delimiter).collect();
+        let mut current_level = &mut self.key_tree;
+        for (i, part) in parts.iter().enumerate() {
+            if i == parts.len() - 1 {
+                current_level
+                    .entry(part.to_string())
+                    .or_insert_with(|| KeyTreeNode::Leaf {
+                        full_key_name: full_key_name.to_string(),
+                    });
+            } else {
+                let node = current_level
+                    .entry(part.to_string())
+                    .or_insert_with(|| KeyTreeNode::Folder(HashMap::new()));
+
+                if matches!(node, KeyTreeNode::Leaf { .. }) {
+                    *node = KeyTreeNode::Folder(HashMap::new());
+                }
+
+                if let KeyTreeNode::Folder(sub_map) = node {
+                    current_level = sub_map;
                 } else {
-                    let node = current_level
-                        .entry(part.to_string())
-                        .or_insert_with(|| KeyTreeNode::Folder(HashMap::new()));
-
-                    if matches!(node, KeyTreeNode::Leaf { .. }) {
-                        *node = KeyTreeNode::Folder(HashMap::new());
-                    }
-
-                    if let KeyTreeNode::Folder(sub_map) = node {
-                        current_level = sub_map;
-                    } else {
-                        unreachable!(
-                            "Node should have been converted to a Folder if it was a Leaf"
-                        );
-                    }
+                    unreachable!(
+                        "Node should have been converted to a Folder if it was a Leaf"
+                    );
                 }
             }
         }
-        self.key_tree = tree;
     }
 
     pub fn previous_key_in_view(&mut self) {
@@ -384,10 +491,9 @@ impl App {
                         _ => None,
                     });
                 if let Some(actual_full_key_name) = actual_full_key_name_opt {
+                    self.value_viewer.clear();
                     self.value_viewer.active_leaf_key_name = Some(actual_full_key_name.clone());
                     self.value_viewer.selected_key_type = Some("fetching...".to_string());
-                    self.value_viewer.selected_value_sub_index = 0;
-                    self.value_viewer.value_view_scroll = (0, 0);
                     let mut con = match self.redis.connection.take() {
                         Some(con) => con,
                         None => {
@@ -398,126 +504,8 @@ impl App {
                             return;
                         }
                     };
-                    // Fetch TTL and type for the selected key only
-                    let ttl = redis::cmd("TTL")
-                        .arg(&actual_full_key_name)
-                        .query_async::<i64>(&mut con)
-                        .await
-                        .unwrap_or(-2);
-                    self.ttl_map.insert(actual_full_key_name.clone(), ttl);
-                    let key_type = redis::cmd("TYPE")
-                        .arg(&actual_full_key_name)
-                        .query_async::<String>(&mut con)
-                        .await
-                        .unwrap_or("unknown".to_string());
-                    self.type_map
-                        .insert(actual_full_key_name.clone(), key_type.clone());
-                    match redis::cmd("GET")
-                        .arg(&actual_full_key_name)
-                        .query_async::<Option<String>>(&mut con)
-                        .await
-                    {
-                        Ok(Some(value)) => {
-                            self.value_viewer.selected_key_type = Some("string".to_string());
-                            self.value_viewer.selected_key_value = Some(value);
-                        }
-                        Ok(None) => {
-                            self.value_viewer.selected_key_type = Some("string".to_string());
-                            self.value_viewer.selected_key_value = Some("(nil)".to_string());
-                        }
-                        Err(e_get) => {
-                            let mut is_wrong_type_error = false;
-                            if e_get.kind() == redis::ErrorKind::TypeError {
-                                is_wrong_type_error = true;
-                            } else if e_get.kind() == redis::ErrorKind::ExtensionError {
-                                if let Some(code) = e_get.code() {
-                                    if code == "WRONGTYPE" {
-                                        is_wrong_type_error = true;
-                                    }
-                                }
-                            }
-                            if is_wrong_type_error {
-                                match redis::cmd("TYPE")
-                                    .arg(&actual_full_key_name)
-                                    .query_async::<String>(&mut con)
-                                    .await
-                                {
-                                    Ok(key_type) => {
-                                        self.value_viewer.selected_key_type =
-                                            Some(key_type.clone());
-                                        match key_type.to_uppercase().as_str() {
-                                            "HASH" => {
-                                                self.fetch_and_set_hash_value(
-                                                    &actual_full_key_name,
-                                                    &mut con,
-                                                )
-                                                .await
-                                            }
-                                            "ZSET" => {
-                                                self.fetch_and_set_zset_value(
-                                                    &actual_full_key_name,
-                                                    &mut con,
-                                                )
-                                                .await
-                                            }
-                                            "LIST" => {
-                                                self.fetch_and_set_list_value(
-                                                    &actual_full_key_name,
-                                                    &mut con,
-                                                )
-                                                .await
-                                            }
-                                            "SET" => {
-                                                self.fetch_and_set_set_value(
-                                                    &actual_full_key_name,
-                                                    &mut con,
-                                                )
-                                                .await
-                                            }
-                                            "STREAM" => {
-                                                self.fetch_and_set_stream_value(
-                                                    &actual_full_key_name,
-                                                    &mut con,
-                                                )
-                                                .await
-                                            }
-                                            "REJSON-RL" => {
-                                                self.fetch_and_set_json_value(
-                                                    &actual_full_key_name,
-                                                    &mut con,
-                                                )
-                                                .await
-                                            }
-                                            _ => {
-                                                self.value_viewer.selected_key_value = Some(format!(
-                                                    "Key is of type '{}'. Value view for this type not yet implemented.",
-                                                    key_type
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    Err(e_type) => {
-                                        self.value_viewer.selected_key_type =
-                                            Some("error (TYPE failed)".to_string());
-                                        self.value_viewer.selected_key_value = Some(format!(
-                                            "GET for '{}' failed (WRONGTYPE). Subsequent TYPE command also failed: {}",
-                                            actual_full_key_name, e_type
-                                        ));
-                                    }
-                                }
-                            } else {
-                                self.value_viewer.selected_key_type =
-                                    Some("error (GET failed)".to_string());
-                                self.value_viewer.selected_key_value = Some(format!(
-                                    "Failed to GET key '{}': {} (Kind: {:?}, Code: {:?})",
-                                    actual_full_key_name,
-                                    e_get,
-                                    e_get.kind(),
-                                    e_get.code()
-                                ));
-                            }
-                        }
-                    }
+                    self.fetch_value_for_key(&actual_full_key_name, &mut con)
+                        .await;
                     self.redis.connection = Some(con);
                 } else {
                     self.value_viewer.selected_key_type = Some("error".to_string());
@@ -723,107 +711,18 @@ impl App {
                     });
 
                 if let Some(actual_full_key_name) = actual_full_key_name_opt {
+                    self.value_viewer.clear();
                     self.value_viewer.active_leaf_key_name = Some(actual_full_key_name.clone());
                     self.value_viewer.selected_key_type = Some("fetching...".to_string());
-                    self.value_viewer.selected_value_sub_index = 0;
-                    self.value_viewer.value_view_scroll = (0, 0);
 
                     let mut con = match self.redis.connection.take() {
                         Some(con) => con,
                         None => return,
                     };
 
-                    // Fetch TTL and type for the selected key only
-                    let ttl = redis::cmd("TTL")
-                        .arg(&actual_full_key_name)
-                        .query_async::<i64>(&mut con)
-                        .await
-                        .unwrap_or(-2);
-                    self.ttl_map.insert(actual_full_key_name.clone(), ttl);
-                    let key_type = redis::cmd("TYPE")
-                        .arg(&actual_full_key_name)
-                        .query_async::<String>(&mut con)
-                        .await
-                        .unwrap_or("unknown".to_string());
-                    self.type_map
-                        .insert(actual_full_key_name.clone(), key_type.clone());
-
-                    match redis::cmd("GET")
-                        .arg(&actual_full_key_name)
-                        .query_async::<Option<String>>(&mut con)
-                        .await
-                    {
-                        Ok(Some(value)) => {
-                            self.value_viewer.selected_key_type = Some("string".to_string());
-                            self.value_viewer.selected_key_value = Some(value);
-                        }
-                        Ok(None) => {
-                            self.value_viewer.selected_key_type = Some("empty".to_string());
-                            self.value_viewer.selected_key_value = Some("(empty)".to_string());
-                        }
-                        Err(e) => {
-                            let error_msg = e;
-                            if error_msg.to_string().contains("WRONGTYPE") {
-                                match key_type.to_uppercase().as_str() {
-                                    "HASH" => {
-                                        self.fetch_and_set_hash_value(
-                                            &actual_full_key_name,
-                                            &mut con,
-                                        )
-                                        .await;
-                                    }
-                                    "ZSET" => {
-                                        self.fetch_and_set_zset_value(
-                                            &actual_full_key_name,
-                                            &mut con,
-                                        )
-                                        .await;
-                                    }
-                                    "LIST" => {
-                                        self.fetch_and_set_list_value(
-                                            &actual_full_key_name,
-                                            &mut con,
-                                        )
-                                        .await;
-                                    }
-                                    "SET" => {
-                                        self.fetch_and_set_set_value(
-                                            &actual_full_key_name,
-                                            &mut con,
-                                        )
-                                        .await;
-                                    }
-                                    "STREAM" => {
-                                        self.fetch_and_set_stream_value(
-                                            &actual_full_key_name,
-                                            &mut con,
-                                        )
-                                        .await;
-                                    }
-                                    "REJSON-RL" => {
-                                        self.fetch_and_set_json_value(
-                                            &actual_full_key_name,
-                                            &mut con,
-                                        )
-                                        .await;
-                                    }
-                                    _ => {
-                                        self.value_viewer.selected_key_type =
-                                            Some("unknown".to_string());
-                                        self.value_viewer.selected_key_value =
-                                            Some("Unknown key type".to_string());
-                                    }
-                                }
-                            } else {
-                                self.value_viewer.selected_key_type = Some("error".to_string());
-                                self.value_viewer.selected_key_value =
-                                    Some(format!("Error fetching value: {}", error_msg));
-                            }
-                        }
-                    }
-
+                    self.fetch_value_for_key(&actual_full_key_name, &mut con)
+                        .await;
                     self.redis.connection = Some(con);
-                    self.value_viewer.update_current_display_value();
                 }
             }
         }
@@ -907,12 +806,10 @@ impl App {
             } else {
                 Err("Prefix to delete was None".to_string())
             }
+        } else if let Some(key_path) = self.delete_dialog.key_to_delete_full_path.clone() {
+            self.delete_redis_key_async(&key_path).await
         } else {
-            if let Some(key_path) = self.delete_dialog.key_to_delete_full_path.clone() {
-                self.delete_redis_key_async(&key_path).await
-            } else {
-                Err("Key path to delete was None".to_string())
-            }
+            Err("Key path to delete was None".to_string())
         };
 
         match result {
@@ -937,62 +834,94 @@ impl App {
         self.clear_selected_key_info();
     }
 
-    async fn delete_redis_prefix_async(&mut self, prefix: &str) -> Result<String, String> {
-        let pattern = format!(
-            "{}{}",
-            prefix,
-            if prefix.ends_with(self.key_delimiter) {
-                "*"
-            } else {
-                "*"
+    async fn delete_keys_batch(
+        &self,
+        con: &mut MultiplexedConnection,
+        keys: &[String],
+        prefer_unlink: &mut bool,
+    ) -> Result<i64, String> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+
+        let result = if *prefer_unlink {
+            redis::cmd("UNLINK").arg(keys).query_async::<i64>(con).await
+        } else {
+            redis::cmd("DEL").arg(keys).query_async::<i64>(con).await
+        };
+
+        match result {
+            Ok(count) => Ok(count),
+            Err(e) => {
+                if *prefer_unlink && is_unknown_command_error(&e) {
+                    *prefer_unlink = false;
+                    redis::cmd("DEL")
+                        .arg(keys)
+                        .query_async::<i64>(con)
+                        .await
+                        .map_err(|err| format!("Error deleting keys: {}", err))
+                } else {
+                    Err(format!("Error deleting keys: {}", e))
+                }
             }
-        );
-        let mut keys_to_delete: Vec<String> = Vec::new();
+        }
+    }
+
+    async fn delete_prefix_keys(
+        &self,
+        con: &mut MultiplexedConnection,
+        prefix: &str,
+        prefer_unlink: &mut bool,
+    ) -> Result<i64, String> {
+        let pattern = format!("{}*", prefix);
         let mut cursor: u64 = 0;
+        let mut batch = Vec::new();
+        let mut total_deleted: i64 = 0;
+
+        loop {
+            let (next_cursor, keys) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(1000)
+                .query_async::<(u64, Vec<String>)>(con)
+                .await
+                .map_err(|e| format!("Error scanning keys for prefix {}: {}", prefix, e))?;
+
+            for key in keys {
+                batch.push(key);
+                if batch.len() >= DELETE_BATCH_SIZE {
+                    total_deleted += self.delete_keys_batch(con, &batch, prefer_unlink).await?;
+                    batch.clear();
+                }
+            }
+
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        if !batch.is_empty() {
+            total_deleted += self.delete_keys_batch(con, &batch, prefer_unlink).await?;
+        }
+
+        Ok(total_deleted)
+    }
+
+    async fn delete_redis_prefix_async(&mut self, prefix: &str) -> Result<String, String> {
         let mut con = match self.redis.connection.take() {
             Some(con) => con,
             None => return Err("No Redis connection available for deleting prefix.".to_string()),
         };
 
-        let result = async {
-            loop {
-                match redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(&pattern)
-                    .arg("COUNT")
-                    .arg(100)
-                    .query_async::<(u64, Vec<String>)>(&mut con)
-                    .await
-                {
-                    Ok((next_cursor, batch)) => {
-                        keys_to_delete.extend(batch);
-                        if next_cursor == 0 {
-                            break;
-                        }
-                        cursor = next_cursor;
-                    }
-                    Err(e) => {
-                        return Err(format!("Error scanning keys for prefix {}: {}", prefix, e))
-                    }
-                }
-            }
-            if keys_to_delete.is_empty() {
-                return Ok(format!("No keys found matching prefix '{}'.", prefix));
-            }
-            match redis::cmd("DEL")
-                .arg(keys_to_delete.as_slice())
-                .query_async::<i32>(&mut con)
-                .await
-            {
-                Ok(count) => Ok(format!(
-                    "Deleted {} keys matching prefix '{}'.",
-                    count, prefix
-                )),
-                Err(e) => Err(format!("Error deleting keys for prefix {}: {}", prefix, e)),
-            }
-        }
-        .await;
+        let mut prefer_unlink = true;
+        let result = match self.delete_prefix_keys(&mut con, prefix, &mut prefer_unlink).await {
+            Ok(0) => Ok(format!("No keys found matching prefix '{}'.", prefix)),
+            Ok(count) => Ok(format!("Deleted {} keys matching prefix '{}'.", count, prefix)),
+            Err(e) => Err(e),
+        };
 
         self.redis.connection = Some(con);
         result
@@ -1004,9 +933,9 @@ impl App {
             None => return Err("No Redis connection available for deleting key.".to_string()),
         };
 
-        let result = match redis::cmd("DEL")
-            .arg(full_key)
-            .query_async::<i32>(&mut con)
+        let mut prefer_unlink = true;
+        let result = match self
+            .delete_keys_batch(&mut con, &[full_key.to_string()], &mut prefer_unlink)
             .await
         {
             Ok(count) => {
@@ -1016,7 +945,7 @@ impl App {
                     Ok(format!("Key '{}' not found or already deleted.", full_key))
                 }
             }
-            Err(e) => Err(format!("Error deleting key {}: {}", full_key, e)),
+            Err(e) => Err(e),
         };
 
         self.redis.connection = Some(con);
@@ -1029,73 +958,54 @@ impl App {
             None => return Err("No Redis connection available for multi-delete.".to_string()),
         };
 
-        let mut total_deleted = 0;
+        let mut total_deleted: i64 = 0;
         let mut errors = Vec::new();
+        let mut prefer_unlink = true;
+        let mut key_batch = Vec::new();
 
         for item in &self.delete_dialog.keys_to_delete {
-            if item.starts_with("folder:") {
-                // Handle folder deletion
-                let prefix = &item[7..]; // Remove "folder:" prefix
-                let pattern = format!(
-                    "{}{}",
-                    prefix,
-                    if prefix.ends_with(self.key_delimiter) {
-                        "*"
-                    } else {
-                        "*"
-                    }
-                );
-                let mut keys_to_delete: Vec<String> = Vec::new();
-                let mut cursor: u64 = 0;
-
-                // Scan for keys matching the folder pattern
-                loop {
-                    match redis::cmd("SCAN")
-                        .arg(cursor)
-                        .arg("MATCH")
-                        .arg(&pattern)
-                        .arg("COUNT")
-                        .arg(100)
-                        .query_async::<(u64, Vec<String>)>(&mut con)
-                        .await
-                    {
-                        Ok((next_cursor, batch)) => {
-                            keys_to_delete.extend(batch);
-                            if next_cursor == 0 {
-                                break;
-                            }
-                            cursor = next_cursor;
-                        }
-                        Err(e) => {
-                            errors
-                                .push(format!("Error scanning keys for folder {}: {}", prefix, e));
-                            break;
-                        }
-                    }
-                }
-
-                if !keys_to_delete.is_empty() {
-                    match redis::cmd("DEL")
-                        .arg(keys_to_delete.as_slice())
-                        .query_async::<i32>(&mut con)
+            if let Some(prefix) = item.strip_prefix("folder:") {
+                if !key_batch.is_empty() {
+                    match self
+                        .delete_keys_batch(&mut con, &key_batch, &mut prefer_unlink)
                         .await
                     {
                         Ok(count) => total_deleted += count,
-                        Err(e) => {
-                            errors.push(format!("Error deleting keys for folder {}: {}", prefix, e))
-                        }
+                        Err(e) => errors.push(e),
                     }
+                    key_batch.clear();
                 }
-            } else {
-                // Handle single key deletion
-                match redis::cmd("DEL")
-                    .arg(item)
-                    .query_async::<i32>(&mut con)
+                // Handle folder deletion
+                match self
+                    .delete_prefix_keys(&mut con, prefix, &mut prefer_unlink)
                     .await
                 {
                     Ok(count) => total_deleted += count,
-                    Err(e) => errors.push(format!("Error deleting key {}: {}", item, e)),
+                    Err(e) => errors.push(e),
                 }
+            } else {
+                // Handle single key deletion
+                key_batch.push(item.clone());
+                if key_batch.len() >= DELETE_BATCH_SIZE {
+                    match self
+                        .delete_keys_batch(&mut con, &key_batch, &mut prefer_unlink)
+                        .await
+                    {
+                        Ok(count) => total_deleted += count,
+                        Err(e) => errors.push(e),
+                    }
+                    key_batch.clear();
+                }
+            }
+        }
+
+        if !key_batch.is_empty() {
+            match self
+                .delete_keys_batch(&mut con, &key_batch, &mut prefer_unlink)
+                .await
+            {
+                Ok(count) => total_deleted += count,
+                Err(e) => errors.push(e),
             }
         }
 
@@ -1117,7 +1027,7 @@ impl App {
         self.is_key_view_focused = true;
         self.is_value_view_focused = false;
         self.search_state
-            .update_filtered_keys(&self.raw_keys.clone());
+            .update_filtered_keys(&self.raw_keys);
     }
 
     pub fn exit_search_mode(&mut self) {
@@ -1126,7 +1036,7 @@ impl App {
 
     pub fn update_filtered_keys(&mut self) {
         self.search_state
-            .update_filtered_keys(&self.raw_keys.clone());
+            .update_filtered_keys(&self.raw_keys);
     }
 
     pub fn select_next_filtered_key(&mut self) {
@@ -1273,6 +1183,11 @@ impl App {
             Some(stats) => stats.is_stale(std::time::Duration::from_secs(2)),
         }
     }
+}
+
+fn is_unknown_command_error(err: &redis::RedisError) -> bool {
+    err.kind() == redis::ErrorKind::Extension
+        && err.to_string().to_lowercase().contains("unknown command")
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ pub async fn copy_selected_key_name_to_clipboard(app: &mut App) {
     if let Some(name) = key_to_copy {
         let name_clone_for_closure = name.clone();
         let result: Result<Result<String, ClipboardError>, tokio::task::JoinError> = task::spawn_blocking(move || {
-            let clipboard = SystemClipboard::new().map_err(|e| e)?; // Propagate error if SystemClipboard::new() fails
+            let clipboard = SystemClipboard::new()?; // Propagate error if SystemClipboard::new() fails
             clipboard.set_string_contents(name_clone_for_closure.clone())?;
             Ok(name_clone_for_closure)
         }).await;
@@ -61,16 +61,17 @@ pub async fn copy_selected_key_value_to_clipboard(app: &mut App) {
             if let Some(lines) = &app.value_viewer.displayed_value_lines {
                 if !lines.is_empty() {
                     value_to_copy = Some(lines.join("\n"));
-                } else {
-                    if let Some(cvd) = &app.value_viewer.current_display_value {
-                        if !cvd.starts_with("(") || !cvd.ends_with(")") {
-                            value_to_copy = Some(cvd.clone());
-                        } else {
-                            app.clipboard_status = Some(format!("Value is an empty placeholder: {}", cvd));
-                        }
+                } else if let Some(cvd) = &app.value_viewer.current_display_value {
+                    if !cvd.starts_with("(") || !cvd.ends_with(")") {
+                        value_to_copy = Some(cvd.clone());
                     } else {
-                         app.clipboard_status = Some("No value content to copy (displayed_value_lines is empty).".to_string());
+                        app.clipboard_status =
+                            Some(format!("Value is an empty placeholder: {}", cvd));
                     }
+                } else {
+                    app.clipboard_status = Some(
+                        "No value content to copy (displayed_value_lines is empty).".to_string(),
+                    );
                 }
             } else if let Some(s_val) = &app.value_viewer.current_display_value {
                 value_to_copy = Some(s_val.clone());
@@ -85,7 +86,7 @@ pub async fn copy_selected_key_value_to_clipboard(app: &mut App) {
     if let Some(value_str) = value_to_copy {
         let value_str_clone_for_closure = value_str.clone();
         let result: Result<Result<String, ClipboardError>, tokio::task::JoinError> = task::spawn_blocking(move || {
-            let clipboard = SystemClipboard::new().map_err(|e| e)?; // Propagate error
+            let clipboard = SystemClipboard::new()?; // Propagate error
             clipboard.set_string_contents(value_str_clone_for_closure.clone())?;
             Ok(value_str_clone_for_closure)
         }).await;

@@ -26,6 +26,7 @@ impl ValueViewer {
         self.selected_key_value_zset = None;
         self.selected_key_value_list = None;
         self.selected_key_value_set = None;
+        self.selected_key_value_json = None;
         self.selected_key_value_stream = None;
         self.current_display_value = None;
         self.displayed_value_lines = None;
@@ -133,7 +134,7 @@ impl ValueViewer {
                             }
                             lines.push("---".to_string());
                         }
-                        if lines.last().map_or(false, |l| l == "---") {
+                        if lines.last().is_some_and(|l| l == "---") {
                             lines.pop();
                         }
                         self.displayed_value_lines = Some(lines);
@@ -142,7 +143,9 @@ impl ValueViewer {
                     self.current_display_value = self.selected_key_value.clone();
                 }
             }
-            Some("REJSON-RL") => self.current_display_value = self.selected_key_value_json.take(),
+            Some("REJSON-RL") | Some("JSON") => {
+                self.current_display_value = self.selected_key_value_json.clone();
+            }
             _ => self.current_display_value = self.selected_key_value.clone(),
         }
     }

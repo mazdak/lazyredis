@@ -45,24 +45,27 @@ impl SearchState {
     pub fn update_filtered_keys(&mut self, raw_keys: &[String]) {
         if self.query.is_empty() {
             self.filtered_keys.clear();
-        } else {
-            let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
-            self.filtered_keys = raw_keys
-                .iter()
-                .filter_map(|full_key_name| {
-                    matcher.fuzzy_match(full_key_name, &self.query)
-                        .map(|_score| full_key_name.clone())
-                })
-                .collect();
+            self.selected_index = 0;
+            return;
+        }
+
+        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+        self.filtered_keys = raw_keys
+            .iter()
+            .filter_map(|full_key_name| {
+                matcher
+                    .fuzzy_match(full_key_name, &self.query)
+                    .map(|_score| full_key_name.clone())
+            })
+            .collect();
+
+        if self.filtered_keys.is_empty() {
+            self.selected_index = 0;
+            return;
         }
 
         if self.selected_index >= self.filtered_keys.len() {
-            self.selected_index = self.filtered_keys.len().saturating_sub(1);
-        }
-        if self.filtered_keys.is_empty() && !self.query.is_empty(){
-            self.selected_index = 0; 
-        } else if self.filtered_keys.len() == 1 {
-            self.selected_index = 0; 
+            self.selected_index = self.filtered_keys.len() - 1;
         }
     }
 
@@ -84,7 +87,7 @@ impl SearchState {
 
     // Takes necessary App data as read-only references or copies
     // Returns information needed by App to complete the activation
-    pub fn activate_selected_filtered(&self, key_delimiter: char, key_tree: &HashMap<String, KeyTreeNode>, raw_keys: &[String]) -> Option<SearchActivationInfo> {
+pub fn activate_selected_filtered(&self, key_delimiter: char, key_tree: &HashMap<String, KeyTreeNode>, raw_keys: &[String]) -> Option<SearchActivationInfo> {
         if self.selected_index < self.filtered_keys.len() {
             let full_key_path = self.filtered_keys[self.selected_index].clone();
             let path_segments: Vec<String> = full_key_path.split(key_delimiter).map(|s| s.to_string()).collect();
@@ -129,4 +132,55 @@ impl SearchState {
             None
         }
     }
-} 
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::KeyTreeNode;
+    use std::collections::HashMap;
+
+    #[test]
+    fn activate_selected_filtered_detects_folder_by_prefix() {
+        let mut state = SearchState::new();
+        state.filtered_keys = vec!["foo".to_string()];
+        state.selected_index = 0;
+
+        let key_tree: HashMap<String, KeyTreeNode> = HashMap::new();
+        let raw_keys = vec!["foo:bar".to_string()];
+
+        let info = state
+            .activate_selected_filtered(':', &key_tree, &raw_keys)
+            .expect("activation");
+
+        assert!(info.is_folder);
+    }
+
+    #[test]
+    fn activate_selected_filtered_detects_leaf() {
+        let mut state = SearchState::new();
+        state.filtered_keys = vec!["alpha".to_string()];
+        state.selected_index = 0;
+
+        let mut key_tree = HashMap::new();
+        key_tree.insert(
+            "alpha".to_string(),
+            KeyTreeNode::Leaf {
+                full_key_name: "alpha".to_string(),
+            },
+        );
+        let raw_keys = vec!["alpha".to_string()];
+
+        let info = state
+            .activate_selected_filtered(':', &key_tree, &raw_keys)
+            .expect("activation");
+
+        assert!(!info.is_folder);
+    }
+}

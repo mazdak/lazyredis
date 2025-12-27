@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
                     p.dev.unwrap_or(false)
                         || if let Ok(url) = Url::parse(&p.url) {
                             url.host_str()
-                                .map_or(false, |host| host == "localhost" || host == "127.0.0.1")
+                                .is_some_and(|host| host == "localhost" || host == "127.0.0.1")
                         } else {
                             false
                         }
@@ -333,11 +333,13 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                 }
                                 _ => {}
                             }
+                        } else if (key.modifiers == KeyModifiers::SHIFT
+                            && key.code == KeyCode::Tab)
+                            || key.code == KeyCode::BackTab
+                        {
+                            app.cycle_focus_backward();
                         } else {
-                            if (key.modifiers == KeyModifiers::SHIFT && key.code == KeyCode::Tab) || key.code == KeyCode::BackTab {
-                                app.cycle_focus_backward();
-                            } else {
-                                match key.code {
+                            match key.code {
                                     KeyCode::Char('q') => return Ok(()),
                                     KeyCode::Char('/') => {
                                         app.enter_search_mode();
@@ -428,7 +430,6 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                     _ => {}
                                 }
                             }
-                        }
                     } // End of if app.pending_operation.is_none()
                 }
             }
