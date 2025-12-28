@@ -89,7 +89,7 @@ fn draw_profiles_or_db_list(f: &mut Frame, app: &App, area: Rect) {
     let profile_name_str = current_profile.map_or("Unknown", |p| p.name.as_str());
     let profile_color = current_profile.map_or(Color::White, |p| p.resolved_color());
 
-    let base_title_text = format!("Profile: {} - Databases / Connection", profile_name_str);
+    let base_title_text = format!("1: Profile: {} - Databases / Connection", profile_name_str);
     let block_title = if is_focused {
         format!("{} [FOCUSED]", base_title_text)
     } else {
@@ -170,9 +170,10 @@ fn format_ttl(ttl: i64) -> String {
 }
 
 fn draw_key_list_panel(f: &mut Frame, app: &App, area: Rect) {
-    let mut key_view_base_title = format!("Keys: {}", app.current_breadcrumb.join(&app.key_delimiter.to_string()));
+    let mut key_view_base_title =
+        format!("2: Keys: {}", app.current_breadcrumb.join(&app.key_delimiter.to_string()));
     if app.search_state.is_active {
-        key_view_base_title = format!("Search Results (Global): {}", app.search_state.query);
+        key_view_base_title = format!("2: Search Results (Global): {}", app.search_state.query);
     }
     let key_view_title = if app.is_key_view_focused {
         format!("{} [FOCUSED]", key_view_base_title)
@@ -231,9 +232,14 @@ fn draw_value_display_panel(f: &mut Frame, app: &App, area: Rect) {
         Some(name) => {
             let ttl = app.ttl_map.get(name).copied().unwrap_or(-2);
             let ttl_str = format_ttl(ttl);
-            format!("Value: {} ({}) | TTL: {}", name, app.value_viewer.selected_key_type.as_deref().unwrap_or("N/A"), ttl_str)
+            format!(
+                "3: Value: {} ({}) | TTL: {}",
+                name,
+                app.value_viewer.selected_key_type.as_deref().unwrap_or("N/A"),
+                ttl_str
+            )
         },
-        None => "Value".to_string(),
+        None => "3: Value".to_string(),
     };
     if app.is_value_view_focused {
         value_block_title.push_str(" [FOCUSED]");
@@ -277,6 +283,8 @@ fn draw_footer_help(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("PgUp/PgDn: page nav vals", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
         Span::styled("Tab/S-Tab: focus", Style::default().fg(Color::Yellow)),
+        Span::raw(" | "),
+        Span::styled("1/2/3: jump", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
         Span::styled("Enter: select", Style::default().fg(Color::Yellow)),
         Span::raw(" | "),
@@ -446,9 +454,9 @@ fn draw_command_prompt_modal(f: &mut Frame, app: &App) {
 
 fn draw_redis_stats_panel(f: &mut Frame, app: &App, area: Rect) {
     let title = if app.stats_auto_refresh {
-        "Redis Stats [Auto] (s: toggle)"
+        "4: Redis Stats [Auto] (s: toggle)"
     } else {
-        "Redis Stats [Manual] (s: toggle)"
+        "4: Redis Stats [Manual] (s: toggle)"
     };
 
     let block = Block::default()

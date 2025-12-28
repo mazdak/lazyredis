@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app_config_tui = config::Config::load(None);
+    let app_config_tui = config::Config::load_quiet(None);
     let (initial_url, initial_profile_name) = if let Some(profile_name) = &args.profile {
         match app_config_tui.profiles.iter().find(|p| &p.name == profile_name) {
             Some(p) => (p.url.clone(), p.name.clone()),
@@ -333,22 +333,25 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: app::App) -> i
                                 }
                                 _ => {}
                             }
-                        } else if (key.modifiers == KeyModifiers::SHIFT
-                            && key.code == KeyCode::Tab)
+                        } else if (key.code == KeyCode::Tab
+                            && key.modifiers.contains(KeyModifiers::SHIFT))
                             || key.code == KeyCode::BackTab
                         {
                             app.cycle_focus_backward();
                         } else {
                             match key.code {
-                                    KeyCode::Char('q') => return Ok(()),
-                                    KeyCode::Char('/') => {
-                                        app.enter_search_mode();
-                                    }
-                                    KeyCode::Char('p') => app.toggle_profile_selector(),
-                                    KeyCode::Char('s') => app.toggle_stats_view(),
-                                    KeyCode::Tab => app.cycle_focus_forward(), 
-                                    KeyCode::Char('y') => app.pending_operation = Some(app::PendingOperation::CopyKeyNameToClipboard),
-                                    KeyCode::Char('Y') => app.pending_operation = Some(app::PendingOperation::CopyKeyValueToClipboard),
+                                KeyCode::Char('q') => return Ok(()),
+                                KeyCode::Char('/') => {
+                                    app.enter_search_mode();
+                                }
+                                KeyCode::Char('p') => app.toggle_profile_selector(),
+                                KeyCode::Char('s') => app.toggle_stats_view(),
+                                KeyCode::Tab => app.cycle_focus_forward(),
+                                KeyCode::Char('1') => app.focus_db(),
+                                KeyCode::Char('2') => app.focus_keys(),
+                                KeyCode::Char('3') => app.focus_values(),
+                                KeyCode::Char('y') => app.pending_operation = Some(app::PendingOperation::CopyKeyNameToClipboard),
+                                KeyCode::Char('Y') => app.pending_operation = Some(app::PendingOperation::CopyKeyValueToClipboard),
                                     KeyCode::Char('d') => {
                                         if app.is_key_view_focused {
                                             app.initiate_delete_selected_item(); // This is sync, sets up dialog

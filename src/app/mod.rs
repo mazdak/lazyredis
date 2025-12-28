@@ -566,6 +566,21 @@ impl App {
         self.profile_state.toggle(self.current_profile_index);
     }
 
+    pub fn focus_db(&mut self) {
+        self.is_key_view_focused = false;
+        self.is_value_view_focused = false;
+    }
+
+    pub fn focus_keys(&mut self) {
+        self.is_key_view_focused = true;
+        self.is_value_view_focused = false;
+    }
+
+    pub fn focus_values(&mut self) {
+        self.is_key_view_focused = false;
+        self.is_value_view_focused = true;
+    }
+
     pub fn next_profile_in_list(&mut self) {
         self.profile_state.next(self.profiles.len());
     }
