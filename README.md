@@ -40,13 +40,13 @@ Optional overrides:
 LAZYREDIS_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/mazdak/lazyredis/master/scripts/install.sh | bash
 
 # Pin a specific release
-LAZYREDIS_RELEASE_TAG="0.7.1" curl -fsSL https://raw.githubusercontent.com/mazdak/lazyredis/master/scripts/install.sh | bash
+LAZYREDIS_RELEASE_TAG="v0.7.1" curl -fsSL https://raw.githubusercontent.com/mazdak/lazyredis/master/scripts/install.sh | bash
 
 # Override target triple (e.g., for cross-installing)
 LAZYREDIS_TARGET_TRIPLE="x86_64-unknown-linux-gnu" curl -fsSL https://raw.githubusercontent.com/mazdak/lazyredis/master/scripts/install.sh | bash
 
 # Override asset name directly (if you have a custom build)
-LAZYREDIS_ASSET_NAME="lazyredis-0.7.1-custom.tar.gz" curl -fsSL https://raw.githubusercontent.com/mazdak/lazyredis/master/scripts/install.sh | bash
+LAZYREDIS_ASSET_NAME="lazyredis-v0.7.1-custom.tar.gz" curl -fsSL https://raw.githubusercontent.com/mazdak/lazyredis/master/scripts/install.sh | bash
 ```
 
 Pre-build Linux Binaries are available on Github:
